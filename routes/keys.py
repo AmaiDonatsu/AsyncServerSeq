@@ -113,6 +113,89 @@ async def list_keys(current_user: dict = Depends(get_current_user)):
             detail=f"Error al obtener las claves de API: {str(e)}"
         )
 
+@router.get("/list_available")
+async def list_available_keys():
+    """
+    The available Keys are a keys with the field "reserved" set to False.
+    """
+    try:
+        db = FirebaseConfig.get_firestore()
+        keys_collection = db.collection('keys')
+        query = keys_collection.where('reserved', '==', False)
+        docs = query.stream()
+
+        available_keys = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            available_keys.append(data)
+
+        return {
+            "success": True,
+            "count": len(available_keys),
+            "keys": available_keys
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener las claves disponibles: {str(e)}"
+        )
+
+@router.put("/update_availability/{key_id}")
+async def update_key_availability(
+    key_id: str,
+    reserved: bool,
+    device: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update the availability of an API key
+    """
+    try:
+        user_id = current_user.get('uid')
+
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="No se pudo obtener el ID del usuario del token"
+            )
+
+        db = FirebaseConfig.get_firestore()
+        key_ref = db.collection('keys').document(key_id)
+        key = key_ref.get()
+
+        if not key.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Clave no encontrada"
+            )
+
+        key_data = key.to_dict()
+
+        if key_data.get('user') != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para actualizar esta clave"
+            )
+
+        key_ref.update({"reserved": reserved, "device": device} if device else {"reserved": reserved})
+
+        return {
+            "success": True,
+            "message": "Disponibilidad de la clave actualizada",
+            "key_id": key_id,
+            "reserved": reserved
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar la disponibilidad de la clave: {str(e)}"
+        )
 
 @router.post("/create", response_model=CreateKeyResponse)
 async def create_key(
