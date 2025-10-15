@@ -1,32 +1,31 @@
 import firebase_admin
-from firebase_admin import credentials, storage
+from firebase_admin import credentials, storage, firestore, auth
 import os
 from dotenv import load_dotenv
 
-# Cargar variables de entorno
 load_dotenv()
 
 class FirebaseConfig:
     """
-    Configuración y gestión de Firebase Admin SDK
+    Config class to manage Firebase Admin SDK initialization and services
     """
     _initialized = False
     _bucket = None
+    _firestore_db = None
     
     @classmethod
     def initialize(cls):
         """
-        Inicializa Firebase Admin SDK con las credenciales
+        Init Firebase Admin SDK with credentials
+         --- IGNORE ---
         """
         if cls._initialized:
             print("Firebase ya está inicializado")
             return
         
         try:
-            # Ruta al archivo de credenciales de Firebase
             cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH', 'config/firebase-credentials.json')
             
-            # Nombre del bucket de Storage
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
             
             if not os.path.exists(cred_path):
@@ -41,18 +40,20 @@ class FirebaseConfig:
                     "Ejemplo: FIREBASE_STORAGE_BUCKET=tu-proyecto.appspot.com"
                 )
             
-            # Inicializar Firebase Admin
             cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred, {
                 'storageBucket': bucket_name
             })
             
-            # Obtener referencia al bucket
             cls._bucket = storage.bucket()
+            
+            cls._firestore_db = firestore.client()
+            
             cls._initialized = True
             
             print(f"✓ Firebase inicializado correctamente")
-            print(f"✓ Bucket conectado: {bucket_name}")
+            print(f"✓ Cloud Storage bucket conectado: {bucket_name}")
+            print(f"✓ Firestore database conectado")
             
         except Exception as e:
             print(f"✗ Error al inicializar Firebase: {str(e)}")
@@ -61,7 +62,7 @@ class FirebaseConfig:
     @classmethod
     def get_bucket(cls):
         """
-        Retorna la instancia del bucket de Storage
+        Returnns the Storage bucket instance
         """
         if not cls._initialized:
             cls.initialize()
@@ -69,7 +70,76 @@ class FirebaseConfig:
     
     @classmethod
     def is_initialized(cls):
-        """
-        Verifica si Firebase está inicializado
-        """
         return cls._initialized
+    
+    @classmethod
+    def get_firestore(cls):
+        """
+        Returns the Firestore Database instance
+        
+        Returns:
+            firestore.Client: Client to access Firestore collections
+        
+        Example:
+            db = FirebaseConfig.get_firestore()
+            keys_ref = db.collection('keys')
+            docs = keys_ref.stream()
+        """
+        if not cls._initialized:
+            cls.initialize()
+        return cls._firestore_db
+    
+    @classmethod
+    def verify_token(cls, id_token: str) -> dict:
+        """
+        Verifies a Firebase ID token and returns the decoded token
+        
+        Args:
+            id_token: Token JWT enviado desde el frontend
+        
+        Returns:
+            dict:
+                - uid: user ID
+                - email: Email
+                - email_verified: Email verified status
+                - name: user name (if available)
+                - picture: URL of the user's picture (if available)
+        
+        Raises:
+            auth.InvalidIdTokenError
+            auth.ExpiredIdTokenError
+            auth.RevokedIdTokenError
+        
+        Example:
+            try:
+                decoded_token = FirebaseConfig.verify_token(token)
+                user_id = decoded_token['uid']
+                email = decoded_token['email']
+            except Exception as e:
+                print(f"Token inválido: {e}")
+        """
+        if not cls._initialized:
+            cls.initialize()
+        
+        decoded_token = auth.verify_id_token(id_token)
+        return decoded_token
+    
+    @classmethod
+    def get_user_by_id(cls, user_id: str):
+        """
+        Obtains a user record by their user ID
+        
+        Args:
+            user_id
+        
+        Returns:
+            UserRecord: user registro with all their information
+        
+        Example:
+            user = FirebaseConfig.get_user_by_id('abc123')
+            print(user.email, user.display_name)
+        """
+        if not cls._initialized:
+            cls.initialize()
+        
+        return auth.get_user(user_id)

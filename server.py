@@ -3,34 +3,31 @@ import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from config.firebase_config import FirebaseConfig
 from routes.storage import router as storage_router
+from routes.keys import router as keys_router
 from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
 
-# Cargar variables de entorno
 load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
     """
-    Gestiona el ciclo de vida de la aplicación
-    Se ejecuta al iniciar y al cerrar el servidor
+    Manages the lifespan of the application
     """
-    # Startup: Inicializar Firebase
     print("🚀 Iniciando servidor...")
     try:
         FirebaseConfig.initialize()
         print("✓ Firebase Cloud Storage listo")
+        print("✓ Firebase Firestore listo")
     except Exception as e:
         print(f"⚠ Advertencia: Firebase no se pudo inicializar: {e}")
-        print("El servidor continuará pero las funciones de Storage no estarán disponibles")
+        print("El servidor continuará pero las funciones de Firebase no estarán disponibles")
     
     yield
     
-    # Shutdown
     print("👋 Cerrando servidor...")
 
-# Crear la aplicación con lifespan
 app = fastapi.FastAPI(
     title="AsyncServer API",
     description="API con integración de Firebase Cloud Storage",
@@ -38,7 +35,6 @@ app = fastapi.FastAPI(
     lifespan=lifespan
 )
 
-# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,8 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Incluir routers
 app.include_router(storage_router)
+app.include_router(keys_router)
 
 @app.get("/")
 async def read_root():
