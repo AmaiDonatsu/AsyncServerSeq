@@ -114,14 +114,28 @@ async def list_keys(current_user: dict = Depends(get_current_user)):
         )
 
 @router.get("/list_available")
-async def list_available_keys():
+async def list_available_keys(current_user: dict = Depends(get_current_user)):
     """
     The available Keys are a keys with the field "reserved" set to False.
     """
     try:
+        print("=" * 50)
+        print("DEBUG - list_available_keys")
+        print("Current user data:", current_user)
+        user_id = current_user.get('uid')
+        print("User ID extraído:", user_id)
+        print("=" * 50)
+        
+        if not user_id:
+            print("User ID not found in token")
+            raise HTTPException(
+                status_code=401,
+                detail="No se pudo obtener el ID del usuario del token"
+            )
+        
         db = FirebaseConfig.get_firestore()
         keys_collection = db.collection('keys')
-        query = keys_collection.where('reserved', '==', False)
+        query = keys_collection.where('reserved', '==', False).where('user', '==', user_id)
         docs = query.stream()
 
         available_keys = []
@@ -142,15 +156,50 @@ async def list_available_keys():
             detail=f"Error al obtener las claves disponibles: {str(e)}"
         )
 
+class UpdateKeyRequest(BaseModel):
+    """
+    Body to update key availability
+    """
+    is_available: bool = Field(..., description="Whether the key is available (not reserved)")
+    device: str = Field(..., description="Device name using this key", min_length=1)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "is_available": False,
+                "device": "Smartphone"
+            }
+        }
+
+
 @router.put("/update_availability/{key_id}")
 async def update_key_availability(
     key_id: str,
-    reserved: bool,
-    device: Optional[str] = None,
+    update_data: UpdateKeyRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """
     Update the availability of an API key
+    
+    **Auth Required:**
+    
+    Headers:
+        Authorization: Bearer <firebase_id_token>
+    
+    Body:
+        {
+            "is_available": false,
+            "device": "Smartphone"
+        }
+    
+    Returns:
+        dict: Updated key details
+    
+    Errors:
+        401: Token not provided, invalid, or expired
+        403: User doesn't own this key
+        404: Key not found
+        500: Server error
     """
     try:
         user_id = current_user.get('uid')
@@ -179,13 +228,16 @@ async def update_key_availability(
                 detail="No tienes permiso para actualizar esta clave"
             )
 
-        key_ref.update({"reserved": reserved, "device": device} if device else {"reserved": reserved})
+        reserved = not update_data.is_available
+        key_ref.update({"reserved": reserved, "device": update_data.device})
 
         return {
             "success": True,
             "message": "Disponibilidad de la clave actualizada",
             "key_id": key_id,
-            "reserved": reserved
+            "reserved": reserved,
+            "is_available": update_data.is_available,
+            "device": update_data.device
         }
 
     except HTTPException:
@@ -282,4 +334,48 @@ async def create_key(
         raise HTTPException(
             status_code=500,
             detail=f"Error al crear la clave de API: {str(e)}"
+        )
+    
+@router.get("/get_by_device/{device}")
+async def get_keys_by_device(
+    device: str,
+    actual_user: dict = Depends(get_current_user)
+):
+    """
+    Get API keys filtered by device name for the authenticated user.
+    
+    **Auth Required:**
+    
+    Headers:
+        Authorization: Bearer <firebase_id_token>  """
+    try:
+        user_id = actual_user.get('uid')
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="No se pudo obtener el ID del usuario del token"
+            )
+        
+        db = FirebaseConfig.get_firestore()
+        keys_collection = db.collection('keys')
+        query = keys_collection.where('user', '==', user_id).where('device', '==', device)
+        docs = query.stream()
+        
+        keys_list = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            keys_list.append(data)
+        
+        return {
+            "success": True,
+            "count": len(keys_list),
+            "key": keys_list[0] if keys_list and len(keys_list) > 0 else None
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener las claves por dispositivo: {str(e)}"
         )

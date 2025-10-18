@@ -11,6 +11,10 @@ from typing import Optional
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     
+    print("=" * 60)
+    print("DEBUG - get_current_user")
+    print(f"Authorization header: {authorization}")
+    
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -19,6 +23,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
         )
     
     parts = authorization.split()
+    print(f"Parts after split: {len(parts)} parts")
+    
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -27,9 +33,13 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
         )
     
     token = parts[1]
+    print(f"Token extraído (primeros 50 chars): {token[:50]}...")
+    print(f"Token length: {len(token)}")
     
     try:
         decoded_token = FirebaseConfig.verify_token(token)
+        print(f"Token decodificado exitosamente. UID: {decoded_token.get('uid')}")
+        print("=" * 60)
         return decoded_token
         
     except auth.InvalidIdTokenError:
