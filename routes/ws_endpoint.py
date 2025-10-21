@@ -14,19 +14,19 @@ import asyncio
 router = APIRouter(prefix="/ws", tags=["WebSocket"])
 
 
-# ==========================================
-# Funciones auxiliares de autenticación
+
+# Auxiliary authentication functions
 # ==========================================
 
 async def verify_auth_token(token: str) -> Optional[dict]:
     """
-    Verifica el token de Firebase Auth
+    Verrifys the Firebase Auth token
     
     Args:
         token: Firebase ID token
     
     Returns:
-        dict con la información del usuario si es válido, None si no lo es
+        dict with user info if valid, None if not valid
     """
     try:
         decoded_token = FirebaseConfig.verify_token(token)
@@ -38,21 +38,20 @@ async def verify_auth_token(token: str) -> Optional[dict]:
 
 async def verify_secret_key(user_id: str, secret_key: str, device: str) -> bool:
     """
-    Verifica que el secretKey y device correspondan a una key válida del usuario
+    Verifica que la secret key y el device existen en Firestore para el usuario dado
     
     Args:
-        user_id: ID del usuario autenticado
-        secret_key: Secret key enviada en el request
-        device: Nombre del dispositivo
-    
+        user_id: user ID
+        secret_key: secret key sent in the request
+        device: device name
+
     Returns:
-        True si la key existe y pertenece al usuario, False en caso contrario
+        True if the key exists and belongs to the user, False otherwise
     """
     try:
         db = FirebaseConfig.get_firestore()
         keys_ref = db.collection('keys')
         
-        # Buscar una key que coincida con user, secretKey y device
         query = keys_ref.where('user', '==', user_id)\
                         .where('secretKey', '==', secret_key)\
                         .where('device', '==', device)
@@ -71,55 +70,133 @@ async def verify_secret_key(user_id: str, secret_key: str, device: str) -> bool:
         return False
 
 
-# ==========================================
-# Gestor de conexiones WebSocket
+# WebSocket Connection Manager
 # ==========================================
 
 class ConnectionManager:
     """
-    Gestiona las conexiones WebSocket activas
-    Permite broadcast y mensajes individuales
+    Manages active WebSocket connections
+    Separates between streamers (who send) and viewers (who receive)
     """
     def __init__(self):
-        self.active_connections: dict[str, WebSocket] = {}
+        # Conexiones que transmiten (streamers)
+        self.streamers: dict[str, WebSocket] = {}
+        
+        # Conexiones que visualizan (viewers)
+        # Clave: "user_id:device" -> Lista de WebSockets que están viendo ese stream
+        self.viewers: dict[str, list[WebSocket]] = {}
     
-    async def connect(self, websocket: WebSocket, user_id: str, device: str):
+    async def connect_streamer(self, websocket: WebSocket, user_id: str, device: str):
         """
-        Acepta y registra una nueva conexión WebSocket
+        Acepta y registra una nueva conexión de streaming (transmisión)
         """
         await websocket.accept()
         connection_id = f"{user_id}:{device}"
-        self.active_connections[connection_id] = websocket
-        print(f"🔌 Nueva conexión: {connection_id}")
-        print(f"📊 Conexiones activas: {len(self.active_connections)}")
+        self.streamers[connection_id] = websocket
+        print(f"🎥 Nuevo streamer: {connection_id}")
+        print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
     
-    def disconnect(self, user_id: str, device: str):
+    async def connect_viewer(self, websocket: WebSocket, user_id: str, device: str):
         """
-        Elimina una conexión del registro
+        Acepta y registra una nueva conexión de visualización (viewer)
+        """
+        await websocket.accept()
+        connection_id = f"{user_id}:{device}"
+        
+        if connection_id not in self.viewers:
+            self.viewers[connection_id] = []
+        
+        self.viewers[connection_id].append(websocket)
+        print(f"�️ Nuevo viewer para: {connection_id}")
+        print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+    
+    def disconnect_streamer(self, user_id: str, device: str):
+        """
+        Elimina una conexión de streamer del registro
         """
         connection_id = f"{user_id}:{device}"
-        if connection_id in self.active_connections:
-            del self.active_connections[connection_id]
-            print(f"🔌 Desconexión: {connection_id}")
-            print(f"📊 Conexiones activas: {len(self.active_connections)}")
+        if connection_id in self.streamers:
+            del self.streamers[connection_id]
+            print(f"🎥 Streamer desconectado: {connection_id}")
+            print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+    
+    def disconnect_viewer(self, user_id: str, device: str, websocket: WebSocket):
+        """
+        Elimina una conexión de viewer del registro
+        """
+        connection_id = f"{user_id}:{device}"
+        if connection_id in self.viewers:
+            if websocket in self.viewers[connection_id]:
+                self.viewers[connection_id].remove(websocket)
+                print(f"�️ Viewer desconectado de: {connection_id}")
+                
+                # Si no quedan viewers para este stream, limpiar la lista
+                if len(self.viewers[connection_id]) == 0:
+                    del self.viewers[connection_id]
+            
+            print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+    
+    def is_stream_active(self, user_id: str, device: str) -> bool:
+        connection_id = f"{user_id}:{device}"
+        return connection_id in self.streamers
     
     async def send_personal_message(self, message: str, websocket: WebSocket):
         """
-        Envía un mensaje a una conexión específica
+        Sends a text message to a specific connection
         """
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.send_text(message)
     
+    async def send_personal_bytes(self, data: bytes, websocket: WebSocket):
+        """
+        Sends binary data to a specific connection
+        """
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_bytes(data)
+    
+    async def broadcast_frame_to_viewers(self, user_id: str, device: str, frame_data: bytes):
+        """
+        Sends a frame to all viewers connected to that specific stream
+        """
+        connection_id = f"{user_id}:{device}"
+        
+        if connection_id not in self.viewers:
+            return
+
+        # Send the frame to all viewers
+        disconnected_viewers = []
+        
+        for viewer_ws in self.viewers[connection_id]:
+            try:
+                if viewer_ws.client_state == WebSocketState.CONNECTED:
+                    await viewer_ws.send_bytes(frame_data)
+                else:
+                    disconnected_viewers.append(viewer_ws)
+            except Exception as e:
+                print(f"⚠️ Error enviando frame a viewer: {e}")
+                disconnected_viewers.append(viewer_ws)
+        
+        # Limpiar viewers desconectados
+        for viewer_ws in disconnected_viewers:
+            if viewer_ws in self.viewers[connection_id]:
+                self.viewers[connection_id].remove(viewer_ws)
+    
     async def broadcast(self, message: str):
         """
-        Envía un mensaje a todas las conexiones activas
+        Sends a text message to all connected streamers and viewers
         """
-        for connection in self.active_connections.values():
+        # Send to streamers
+        for connection in self.streamers.values():
             if connection.client_state == WebSocketState.CONNECTED:
                 await connection.send_text(message)
 
+        # Send to viewers
+        for viewer_list in self.viewers.values():
+            for viewer_ws in viewer_list:
+                if viewer_ws.client_state == WebSocketState.CONNECTED:
+                    await viewer_ws.send_text(message)
 
-# Instancia global del gestor de conexiones
+
 manager = ConnectionManager()
 
 
@@ -135,56 +212,177 @@ async def websocket_endpoint(
     device: str = Query(..., description="Device name")
 ):
     """
-    WebSocket endpoint para streaming de pantalla en tiempo real
-    
-    **Autenticación requerida:**
-    
+    WebSocket endpoint for real-time screen streaming
+
+    **Authentication required:**
+
     Query Parameters:
-        - token: Firebase ID token del usuario autenticado
-        - secretKey: Secret key asociada al usuario en Firestore
-        - device: Nombre del dispositivo (debe coincidir con la key en Firestore)
-    
-    **Flujo de autenticación:**
-    1. Se verifica el token de Firebase Auth
-    2. Se extrae el user_id del token
-    3. Se busca en Firestore una key que coincida con: user_id, secretKey y device
-    4. Si todo es válido, se establece la conexión WebSocket
-    
-    **Uso desde el cliente:**
-    ```javascript
-    const ws = new WebSocket(
-        `ws://localhost:8000/ws/stream?token=<firebase_token>&secretKey=<secret>&device=<device_name>`
-    );
-    ```
-    
-    **Protocolo de mensajes:**
-    - Cliente puede enviar frames como datos binarios o JSON
-    - Servidor responde con confirmaciones o errores
-    - Frames esperados: ~15 FPS (cada 66ms aprox)
-    
-    **Ejemplo de uso (Python cliente):**
-    ```python
-    import websockets
-    import asyncio
-    
-    async def stream_screen():
-        uri = f"ws://localhost:8000/ws/stream?token={token}&secretKey={key}&device={device}"
-        async with websockets.connect(uri) as websocket:
-            # Enviar frames
-            await websocket.send(frame_data)
-            response = await websocket.recv()
-    ```
+        - token: Firebase ID token of the authenticated user
+        - secretKey: Secret key associated with the key in Firestore
+        - device: Device name (must match the key in Firestore)
+
+    **Authentication flow:**
+    1. Verify the Firebase Auth token
+    2. Extract the user_id from the token
+    3. Look up a key in Firestore that matches: user_id, secretKey, and device
+    4. If everything is valid, establish the WebSocket connection for streaming
+
+    **Message Protocol:**
+    - Client can send frames as binary data or JSON
+    - Server responds with confirmations or errors
+    - Expected frame rate: ~15 FPS (every 66ms approx)
     """
     
     print("\n" + "="*60)
-    print("🌐 Nueva solicitud de conexión WebSocket")
+    print("🌐 New WebSocket connection")
     print(f"📱 Device: {device}")
-    print(f"🔑 SecretKey (primeros 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
-    print(f"🎫 Token (primeros 50 chars): {token[:50] if len(token) > 50 else token}...")
+    print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
+    print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
+
+    # Verify Firebase Auth token
+    # ==========================================
+    user_data = await verify_auth_token(token)
     
+    if not user_data:
+        print("❌ Authentication failed: Invalid token")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
+        return
+    
+    user_id: str = user_data.get('uid')  # type: ignore
+    if not user_id:
+        print("❌ No se pudo obtener el user_id del token")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User ID no disponible")
+        return
+    
+    user_email = user_data.get('email', 'N/A')
+    
+    print(f"✅ Usuario autenticado: {user_id}")
+    print(f"📧 Email: {user_email}")
+    
+    # Verify secretKey and device in Firestore
     # ==========================================
-    # PASO 1: Verificar token de Firebase Auth
+    is_key_valid = await verify_secret_key(user_id, secretKey, device)
+    
+    if not is_key_valid:
+        print("❌ Validation failed: Secret key or device not valid")
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Secret key or device invalid"
+        )
+        return
+
+    print(f"✅ Secret key and device validated successfully")
+    print("="*60 + "\n")
+    
+    # Establish WebSocket connection as streamer
     # ==========================================
+    await manager.connect_streamer(websocket, user_id, device)
+
+    # Send welcome message
+    welcome_msg = {
+        "type": "connection_established",
+        "message": "Connection established successfully",
+        "user_id": user_id,
+        "device": device,
+        "timestamp": asyncio.get_event_loop().time()
+    }
+    await manager.send_personal_message(json.dumps(welcome_msg), websocket)
+    
+    # Maintain connection and receive frames
+    # ==========================================
+    frame_count = 0
+    
+    try:
+        while True:
+            # bytes or text data
+            try:
+                # Intentar recibir como bytes (para imágenes)
+                data = await websocket.receive_bytes()
+                frame_count += 1
+                
+                print(f"📸 Frame {frame_count} recibido | Tamaño: {len(data)} bytes | User: {user_id} | Device: {device}")
+                
+                await manager.broadcast_frame_to_viewers(user_id, device, data)
+                
+                ack_msg = {
+                    "type": "frame_ack",
+                    "frame_number": frame_count,
+                    "received_bytes": len(data),
+                    "status": "ok"
+                }
+                await manager.send_personal_message(json.dumps(ack_msg), websocket)
+                
+            except Exception as e:
+                try:
+                    data = await websocket.receive_text()
+                    print(f"📝 Mensaje de texto recibido: {data[:100]}...")
+                    
+                    response = {
+                        "type": "text_ack",
+                        "message": "Mensaje recibido",
+                        "status": "ok"
+                    }
+                    await manager.send_personal_message(json.dumps(response), websocket)
+                    
+                except:
+                    print(f"⚠️ Error al recibir datos: {e}")
+                    break
+    
+    except WebSocketDisconnect:
+        print(f"🔌 Streamer desconectado: {user_id}:{device}")
+        manager.disconnect_streamer(user_id, device)
+    
+    except Exception as e:
+        print(f"❌ Error en la conexión WebSocket: {e}")
+        manager.disconnect_streamer(user_id, device)
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
+
+
+# ==========================================
+# Endpoint WebSocket for Viewers
+# ==========================================
+
+@router.websocket("/view")
+async def websocket_view_endpoint(
+    websocket: WebSocket,
+    token: str = Query(..., description="Firebase Auth ID token"),
+    secretKey: str = Query(..., description="Secret key from Firestore keys collection"),
+    device: str = Query(..., description="Device name del stream a visualizar")
+):
+    """
+    WebSocket endpoint for viewing a real-time screen stream
+
+    **Auth required:**
+
+    Query Parameters:
+        - token: Firebase ID token of the authenticated user
+        - secretKey: SecretKey generated and stored in Firestore 
+        - device: device name to view
+
+    **Requirements:**
+    1. The user must be authenticated (valid token)
+    2. The secretKey and device must exist in Firestore for that user
+    3. There must be an active stream for that device (someone transmitting)
+
+    **Flow:**
+    1. The Firebase Auth token is validated
+    2. The secretKey + device are validated in Firestore
+    3. It is verified that there is an active stream for that device
+    4. If everything is valid, the viewer receives the frames in real-time
+    
+    
+    """
+    
+    print("\n" + "="*60)
+    print("👁️ New visualization request")
+    print(f"📱 Device to visualize: {device}")
+    print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
+    print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
+
+    # Token Authentication
+    ###############
+
     user_data = await verify_auth_token(token)
     
     if not user_data:
@@ -203,8 +401,8 @@ async def websocket_endpoint(
     print(f"✅ Usuario autenticado: {user_id}")
     print(f"📧 Email: {user_email}")
     
-    # ==========================================
-    # PASO 2: Verificar secretKey y device en Firestore
+    
+    # Veryfy secretKey and device
     # ==========================================
     is_key_valid = await verify_secret_key(user_id, secretKey, device)
     
@@ -216,89 +414,67 @@ async def websocket_endpoint(
         )
         return
     
-    print(f"✅ Secret key y device validados correctamente")
+    # Active stream verification
+    # ==========================================
+    if not manager.is_stream_active(user_id, device):
+        print(f"❌ No hay stream activo para: {user_id}:{device}")
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="No hay stream activo para este dispositivo"
+        )
+        return
+    
+    print(f"✅ Stream activo encontrado para: {user_id}:{device}")
     print("="*60 + "\n")
     
+    # Connect as viewer
     # ==========================================
-    # PASO 3: Establecer conexión WebSocket
-    # ==========================================
-    await manager.connect(websocket, user_id, device)
+    await manager.connect_viewer(websocket, user_id, device)
     
-    # Enviar mensaje de bienvenida
     welcome_msg = {
-        "type": "connection_established",
-        "message": "Conexión establecida exitosamente",
+        "type": "viewer_connected",
+        "message": "Conectado al stream exitosamente",
         "user_id": user_id,
         "device": device,
         "timestamp": asyncio.get_event_loop().time()
     }
     await manager.send_personal_message(json.dumps(welcome_msg), websocket)
     
-    # ==========================================
-    # PASO 4: Mantener la conexión y recibir frames
-    # ==========================================
-    frame_count = 0
-    
+    # connection established
     try:
         while True:
-            # Recibir datos (puede ser texto o binario)
-            # Para frames de imagen, usar receive_bytes() es más eficiente
             try:
-                # Intentar recibir como bytes (para imágenes)
-                data = await websocket.receive_bytes()
-                frame_count += 1
+                # Optional commands from viewer
+                data = await websocket.receive_text()
+                print(f"📝 Comando del viewer: {data[:100]}...")
                 
-                print(f"📸 Frame {frame_count} recibido | Tamaño: {len(data)} bytes | User: {user_id} | Device: {device}")
+                # Ex:
+                # {"command": "request_keyframe"}
+                # {"command": "change_quality", "quality": 0.8}
                 
-                # Aquí puedes procesar el frame:
-                # - Guardarlo en Storage
-                # - Reenviar a otros clientes (broadcast)
-                # - Procesamiento de imagen
-                # - etc.
-                
-                # Enviar confirmación al cliente
-                ack_msg = {
-                    "type": "frame_ack",
-                    "frame_number": frame_count,
-                    "received_bytes": len(data),
+                response = {
+                    "type": "command_ack",
+                    "message": "Comando recibido",
                     "status": "ok"
                 }
-                await manager.send_personal_message(json.dumps(ack_msg), websocket)
+                await manager.send_personal_message(json.dumps(response), websocket)
                 
+            except WebSocketDisconnect:
+                break
             except Exception as e:
-                # Si no es binario, intentar como texto
-                try:
-                    data = await websocket.receive_text()
-                    print(f"📝 Mensaje de texto recibido: {data[:100]}...")
-                    
-                    # Puedes manejar comandos de control aquí
-                    # Por ejemplo: {"command": "pause"}, {"command": "resume"}, etc.
-                    
-                    response = {
-                        "type": "text_ack",
-                        "message": "Mensaje recibido",
-                        "status": "ok"
-                    }
-                    await manager.send_personal_message(json.dumps(response), websocket)
-                    
-                except:
-                    print(f"⚠️ Error al recibir datos: {e}")
-                    break
+                print(f"⚠️ Error en viewer: {e}")
+                break
     
     except WebSocketDisconnect:
-        print(f"🔌 Cliente desconectado: {user_id}:{device}")
-        manager.disconnect(user_id, device)
+        print(f"👁️ Viewer desconectado de: {user_id}:{device}")
+        manager.disconnect_viewer(user_id, device, websocket)
     
     except Exception as e:
-        print(f"❌ Error en la conexión WebSocket: {e}")
-        manager.disconnect(user_id, device)
+        print(f"❌ Error en la conexión del viewer: {e}")
+        manager.disconnect_viewer(user_id, device, websocket)
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
 
-
-# ==========================================
-# Endpoint de estado (opcional)
-# ==========================================
 
 @router.get("/status")
 async def websocket_status():
@@ -306,9 +482,21 @@ async def websocket_status():
     Obtiene el estado actual de las conexiones WebSocket
     
     Returns:
-        dict: Información sobre conexiones activas
+        dict: Información sobre conexiones activas (streamers y viewers)
     """
+    streamers = list(manager.streamers.keys())
+    
+    viewers_info = {}
+    for stream_id, viewer_list in manager.viewers.items():
+        viewers_info[stream_id] = len(viewer_list)
+    
     return {
-        "active_connections": len(manager.active_connections),
-        "connections": list(manager.active_connections.keys())
+        "streamers": {
+            "count": len(streamers),
+            "active": streamers
+        },
+        "viewers": {
+            "total_count": sum(len(v) for v in manager.viewers.values()),
+            "by_stream": viewers_info
+        }
     }
