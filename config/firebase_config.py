@@ -1,7 +1,10 @@
 import firebase_admin
 from firebase_admin import credentials, storage, firestore, auth
+from google.cloud.firestore import Client as FirestoreClient
 import os
 from dotenv import load_dotenv
+
+from typing import Optional
 
 load_dotenv()
 
@@ -11,7 +14,7 @@ class FirebaseConfig:
     """
     _initialized = False
     _bucket = None
-    _firestore_db = None
+    _firestore_db: Optional[FirestoreClient] = None
     
     @classmethod
     def initialize(cls):
@@ -73,7 +76,7 @@ class FirebaseConfig:
         return cls._initialized
     
     @classmethod
-    def get_firestore(cls):
+    def get_firestore(cls) -> FirestoreClient:
         """
         Returns the Firestore Database instance
         
@@ -87,6 +90,10 @@ class FirebaseConfig:
         """
         if not cls._initialized:
             cls.initialize()
+        
+        if cls._firestore_db is None:
+            raise RuntimeError("Firestore client not initialized")
+        
         return cls._firestore_db
     
     @classmethod
