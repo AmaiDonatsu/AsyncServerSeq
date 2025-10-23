@@ -379,3 +379,45 @@ async def get_keys_by_device(
             status_code=500,
             detail=f"Error al obtener las claves por dispositivo: {str(e)}"
         )
+
+@router.get("/get_reserved_keys")
+async def get_reserved_keys(current_user: dict = Depends(get_current_user)):
+    """
+    Get all reserved API keys for the authenticated user.
+    
+    **Auth Required:**
+    
+    Headers:
+        Authorization: Bearer <firebase_id_token> 
+    """
+    try:
+        user_id = current_user.get('uid')
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="No se pudo obtener el ID del usuario del token"
+            )
+        
+        db = FirebaseConfig.get_firestore()
+        keys_collection = db.collection('keys')
+        query = keys_collection.where('user', '==', user_id).where('reserved', '==', True)
+        docs = query.stream()
+        
+        reserved_keys = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reserved_keys.append(data)
+        
+        return {
+            "success": True,
+            "count": len(reserved_keys),
+            "keys": reserved_keys
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener las claves reservadas: {str(e)}"
+        )
