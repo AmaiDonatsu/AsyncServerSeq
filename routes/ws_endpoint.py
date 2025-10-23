@@ -107,7 +107,9 @@ class ConnectionManager:
             self.viewers[connection_id] = []
         
         self.viewers[connection_id].append(websocket)
-        print(f"�️ Nuevo viewer para: {connection_id}")
+        print(f"👁️ Nuevo viewer para: {connection_id}")
+        print(f"🔍 Total de viewers para este stream: {len(self.viewers[connection_id])}")
+        print(f"🔍 WebSocket state: {websocket.client_state}")
         print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
     
     def disconnect_streamer(self, user_id: str, device: str):
@@ -160,20 +162,29 @@ class ConnectionManager:
         """
         connection_id = f"{user_id}:{device}"
         
+        print(f"🔍 Buscando viewers para: {connection_id}")
+        print(f"🔍 Viewers registrados: {list(self.viewers.keys())}")
+        
         if connection_id not in self.viewers:
+            print(f"⚠️ No hay viewers para este stream")
             return
+
+        print(f"📤 Enviando frame de {len(frame_data)} bytes a {len(self.viewers[connection_id])} viewers")
 
         # Send the frame to all viewers
         disconnected_viewers = []
         
-        for viewer_ws in self.viewers[connection_id]:
+        for idx, viewer_ws in enumerate(self.viewers[connection_id]):
             try:
+                print(f"  → Viewer {idx+1}: enviando (estado: {viewer_ws.client_state})")
                 if viewer_ws.client_state == WebSocketState.CONNECTED:
                     await viewer_ws.send_bytes(frame_data)
+                    print(f"  ✅ Enviado exitosamente a viewer {idx+1}")
                 else:
+                    print(f"  ⚠️ Viewer {idx+1} no conectado")
                     disconnected_viewers.append(viewer_ws)
             except Exception as e:
-                print(f"⚠️ Error enviando frame a viewer: {e}")
+                print(f"  ❌ Error enviando a viewer {idx+1}: {e}")
                 disconnected_viewers.append(viewer_ws)
         
         # Limpiar viewers desconectados
@@ -300,9 +311,17 @@ async def websocket_endpoint(
                 data = await websocket.receive_bytes()
                 frame_count += 1
                 
+                # 🔍 LOGS DETALLADOS
+                connection_id = f"{user_id}:{device}"
+                viewer_count = len(manager.viewers.get(connection_id, []))
+                
                 print(f"📸 Frame {frame_count} recibido | Tamaño: {len(data)} bytes | User: {user_id} | Device: {device}")
+                print(f"👁️ Viewers esperando: {viewer_count}")
+                print(f"🔄 Broadcasting a viewers...")
                 
                 await manager.broadcast_frame_to_viewers(user_id, device, data)
+                
+                print(f"✅ Broadcast completado para frame {frame_count}")
                 
                 ack_msg = {
                     "type": "frame_ack",
