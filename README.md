@@ -1,193 +1,271 @@
-# AsyncServer - FastAPI con Firebase Cloud Storage
+# AsyncServer - FastAPI with Firebase Cloud Storage and WebSocket Streaming
 
-API construida con FastAPI e integración con Firebase Cloud Storage para gestión de archivos.
+API built with FastAPI and integrated with Firebase Cloud Storage for file management and real-time streaming via WebSocket.
 
-## 📋 Requisitos Previos
+## 🧭 Purpose and role in AsyncControl
+
+AsyncServer is the central backend API and WebSocket hub for the AsyncControl ecosystem:
+
+- AsyncControl Mobile App (Android/iOS): captures the screen and streams frames to the server.
+- AsyncControl Web Console: lets users create profiles, manage devices and API keys, and view live streams.
+- This Server/API (you are here): authenticates users, manages accounts and keys, brokers real-time streams, and exposes Cloud Storage utilities.
+
+### What it does
+
+- Identity and accounts: Uses Firebase Auth ID tokens; all requests are scoped to the authenticated user (UID).
+- API Key management: Create/list/update keys stored in Firestore, bound to the user. Fields include `device`, `name`, `secretKey`, and `reserved` to indicate availability. See `routes/keys.py`.
+- Real-time streaming: Mobile devices transmit frames via `WS /ws/stream` and viewers connect via `WS /ws/view`. The server validates `token + secretKey + device` against Firestore and routes frames to all viewers for that user/device. See `routes/ws_endpoint.py`.
+- File operations: Upload, download, list, delete, and generate signed URLs in Firebase Cloud Storage.
+
+### Data flow (high level)
+
+1) User signs in (Firebase Auth) and gets an ID token.
+2) From the Web Console, the user creates an API key in Firestore for a specific `device`.
+3) The Mobile App starts streaming with `token + secretKey + device` → server validates and accepts the stream.
+4) The Web Console joins as a viewer with the same `token + secretKey + device` → server forwards frames in real time.
+
+Security model: Double validation (Firebase Auth + Firestore key binding) and per-user isolation using a connection ID of `uid:device`. Only the owner can manage keys, and viewers must match the same user/device. One active streamer is tracked per `uid:device`.
+
+## 📋 Prerequisites
 
 - Python 3.8+
-- Cuenta de Firebase con Cloud Storage habilitado
-- Archivo de credenciales de Firebase (Service Account)
+- Firebase account with Cloud Storage enabled
+- Firebase Service Account credentials file
 
-## 🚀 Configuración Inicial
+## 🚀 Initial Setup
 
-### 1. Instalar Dependencias
+### 1) Install Dependencies
 
-Las dependencias ya están instaladas en el entorno virtual. Si necesitas reinstalarlas:
+Dependencies are already installed in the virtual environment. If you need to reinstall them:
 
 ```powershell
-.\env\Scripts\Activate.ps1
+./env/Scripts/Activate.ps1
 pip install fastapi uvicorn firebase-admin python-dotenv
 ```
 
-### 2. Configurar Firebase
+### 2) Configure Firebase
 
-#### a) Obtener Credenciales de Firebase
+#### a) Get Firebase Credentials
 
-1. Ve a [Firebase Console](https://console.firebase.google.com/)
-2. Selecciona tu proyecto (o crea uno nuevo)
-3. Ve a **Configuración del Proyecto** (ícono de engranaje) → **Cuentas de servicio**
-4. Haz clic en **Generar nueva clave privada**
-5. Guarda el archivo JSON descargado como `firebase-credentials.json`
+1. Go to [Firebase Console](https://console.firebase.google.com/)
+2. Select your project (or create a new one)
+3. Go to Project Settings (gear icon) → Service Accounts
+4. Click Generate new private key
+5. Save the downloaded JSON as `firebase-credentials.json`
 
-#### b) Colocar el Archivo de Credenciales
+#### b) Place the Credentials File
 
-Copia el archivo descargado a la carpeta `config/`:
+Copy the downloaded file to the `config/` folder:
+
 ```powershell
-copy C:\ruta\de\descarga\tu-proyecto-firebase-adminsdk-xxxxx.json config\firebase-credentials.json
+copy C:\path\to\download\your-project-firebase-adminsdk-xxxxx.json config\firebase-credentials.json
 ```
 
-#### c) Habilitar Cloud Storage
+#### c) Enable Cloud Storage
 
-1. En Firebase Console, ve a **Storage**
-2. Haz clic en **Comenzar**
-3. Configura las reglas de seguridad según tus necesidades
-4. Copia el nombre de tu bucket (ejemplo: `tu-proyecto.appspot.com`)
+1. In Firebase Console, go to Storage
+2. Click Get started
+3. Configure security rules as needed
+4. Copy your bucket name (example: `your-project.appspot.com`)
 
-### 3. Configurar Variables de Entorno
+### 3) Configure Environment Variables
 
-Edita el archivo `.env` y actualiza estos valores:
+Edit the `.env` file and update these values:
 
 ```env
-# Configuración de Firebase
+# Firebase configuration
 FIREBASE_CREDENTIALS_PATH=config/firebase-credentials.json
-FIREBASE_STORAGE_BUCKET=tu-proyecto.appspot.com  # ⚠️ CAMBIA ESTO
+FIREBASE_STORAGE_BUCKET=your-project.appspot.com  # ⚠️ CHANGE THIS
 
-# Configuración del servidor
+# Server configuration
 HOST=0.0.0.0
 PORT=8000
 ```
 
-**⚠️ IMPORTANTE:** Reemplaza `tu-proyecto.appspot.com` con el nombre real de tu bucket.
+⚠️ IMPORTANT: Replace `your-project.appspot.com` with your actual bucket name.
 
-## ▶️ Ejecutar el Servidor
+## ▶️ Run the Server
 
-### Activar el entorno virtual (si no está activado):
+### Activate the virtual environment (if not already active):
+
 ```powershell
-.\env\Scripts\Activate.ps1
+./env/Scripts/Activate.ps1
 ```
 
-### Iniciar el servidor:
+### Start the server:
+
 ```powershell
 python server.py
 ```
 
-El servidor estará disponible en: `http://localhost:8000`
+The server will be available at: `http://localhost:8000`
 
-## 📚 Documentación de la API
+## 📚 API Documentation
 
-Una vez el servidor esté corriendo, accede a:
+Once the server is running, access:
 
-- **Swagger UI (interactiva):** http://localhost:8000/docs
-- **ReDoc:** http://localhost:8000/redoc
+- Swagger UI (interactive): http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
 
-## 🛣️ Endpoints Disponibles
+## 🛣️ Available Endpoints
 
 ### General
 
-- `GET /` - Información básica del servidor
-- `GET /health` - Estado del servidor y Firebase
+- `GET /` - Basic server information
+- `GET /health` - Server and Firebase status
+
+### 🌐 WebSocket Streaming (`/ws`)
+
+#### 📡 Real-Time Stream (Transmitter)
+```
+WS /ws/stream
+```
+- Query parameters:
+  - `token`: Firebase Auth ID token
+  - `secretKey`: Firestore secret key
+  - `device`: Device name
+- Functionality: Real-time screen streaming from mobile apps
+- Role: TRANSMITTER — sends frames to the server
+
+#### 👁️ View Stream (Viewer) ⭐ NEW
+```
+WS /ws/view
+```
+- Query parameters:
+  - `token`: Firebase Auth ID token
+  - `secretKey`: Firestore secret key
+  - `device`: Device name to view
+- Functionality: View your own stream in real time
+- Role: VIEWER — receives frames from the server
+- Use cases:
+  - 📹 View remote security cameras
+  - 💻 Monitor screens in shops/offices
+  - 🏠 Home surveillance
+- Requirements: There must be an active stream for that device
+- Full documentation: see `docs/ENDPOINT_VIEW_STREAM.md`
+
+#### 📊 Connection Status
+```
+GET /ws/status
+```
+- Returns:
+  - Number of active streamers
+  - Number of viewers per stream
+  - List of devices currently streaming
+
+🚀 WebSocket Quickstart: see `docs/QUICKSTART_WEBSOCKET.md`
 
 ### Cloud Storage (`/storage`)
 
-#### 📤 Subir Archivo
+#### 📤 Upload File
 ```
 POST /storage/upload
 ```
-- **Parámetros:**
-  - `file`: Archivo a subir (form-data)
-  - `folder`: (Opcional) Carpeta destino
-- **Retorna:** Información del archivo y URL pública
+- Parameters:
+  - `file`: File to upload (form-data)
+  - `folder`: (Optional) Destination folder
+- Returns: File info and public URL
 
-#### 📥 Descargar Archivo
+#### 📥 Download File
 ```
 GET /storage/download/{file_path}
 ```
-- **Parámetros:**
-  - `file_path`: Ruta completa del archivo
-- **Retorna:** El archivo para descargar
+- Parameters:
+  - `file_path`: Full file path
+- Returns: The file contents for download
 
-#### 📋 Listar Archivos
+#### 📋 List Files
 ```
 GET /storage/list
 ```
-- **Parámetros (query):**
-  - `prefix`: (Opcional) Filtrar por carpeta
-- **Retorna:** Lista de archivos con metadatos
+- Query parameters:
+  - `prefix`: (Optional) Filter by folder
+- Returns: List of files with metadata
 
-#### 🗑️ Eliminar Archivo
+#### 🗑️ Delete File
 ```
 DELETE /storage/delete/{file_path}
 ```
-- **Parámetros:**
-  - `file_path`: Ruta completa del archivo
-- **Retorna:** Confirmación de eliminación
+- Parameters:
+  - `file_path`: Full file path
+- Returns: Deletion confirmation
 
-#### 🔗 Generar URL Firmada
+#### 🔗 Generate Signed URL
 ```
 GET /storage/url/{file_path}
 ```
-- **Parámetros:**
-  - `file_path`: Ruta del archivo
-  - `expiration_minutes`: (Query, default: 60) Tiempo de expiración
-- **Retorna:** URL temporal firmada
+- Parameters:
+  - `file_path`: File path
+  - `expiration_minutes`: (Query, default: 60) Expiration time
+- Returns: Temporary signed URL
 
-## 🧪 Probar los Endpoints
+## 🧪 Try the Endpoints
 
-### Ejemplo con cURL (PowerShell):
+### Example with cURL (PowerShell):
 
-#### Subir un archivo:
+#### Upload a file
 ```powershell
 curl -X POST "http://localhost:8000/storage/upload?folder=test" `
   -H "accept: application/json" `
   -H "Content-Type: multipart/form-data" `
-  -F "file=@C:\ruta\a\tu\archivo.jpg"
+  -F "file=@C:\path\to\your\file.jpg"
 ```
 
-#### Listar archivos:
+#### List files
 ```powershell
 curl http://localhost:8000/storage/list
 ```
 
-#### Descargar un archivo:
+#### Download a file
 ```powershell
-curl -o archivo_descargado.jpg http://localhost:8000/storage/download/test/archivo.jpg
+curl -o downloaded_file.jpg http://localhost:8000/storage/download/test/file.jpg
 ```
 
-## 📁 Estructura del Proyecto
+## 📁 Project Structure
 
 ```
 AsyncServer/
-├── server.py              # Aplicación principal
-├── .env                   # Variables de entorno
-├── .gitignore            # Archivos ignorados por git
+├── server.py              # Main application
+├── requirements.txt       # Python dependencies
+├── .env                   # Environment variables
+├── .gitignore             # Files ignored by Git
 ├── config/
-│   ├── firebase_config.py           # Configuración de Firebase
-│   └── firebase-credentials.json    # Credenciales (NO SUBIR A GIT)
+│   ├── firebase_config.py           # Firebase configuration
+│   ├── auth_dependencies.py         # Authentication
+│   └── firebase-credentials.json    # Credentials (DO NOT COMMIT)
 ├── routes/
-│   ├── keys.py           # Rutas existentes
-│   └── storage.py        # Rutas de Cloud Storage
-└── env/                  # Entorno virtual
+│   ├── keys.py           # API keys management
+│   ├── storage.py        # Cloud Storage endpoints
+│   └── ws_endpoint.py    # WebSocket streaming ⭐ NEW
+├── docs/
+│   ├── WEBSOCKET_STREAMING.md       # Full WebSocket guide ⭐
+│   ├── QUICKSTART_WEBSOCKET.md      # Quickstart ⭐
+│   └── REACT_NATIVE_INTEGRATION.md  # Mobile examples ⭐
+├── test/
+│   ├── test_websocket.py            # WebSocket tests ⭐
+│   └── simulate_client.py           # Simulated client ⭐
+└── env/                  # Virtual environment
 ```
 
-## 🔒 Seguridad
+## 🔒 Security
 
-### ⚠️ Archivos Sensibles
+### ⚠️ Sensitive Files
 
-El archivo `.gitignore` ya está configurado para **NO subir** a Git:
-- `config/firebase-credentials.json` - Credenciales de Firebase
-- `.env` - Variables de entorno
-- `env/` - Entorno virtual
+The `.gitignore` is configured to avoid committing:
+- `config/firebase-credentials.json` — Firebase credentials
+- `.env` — Environment variables
+- `env/` — Virtual environment
 
-### 🔐 Reglas de Seguridad en Firebase
+### 🔐 Firebase Security Rules
 
-Por defecto, los archivos son públicos. Para mayor seguridad, configura reglas en Firebase Storage:
+By default, files may be public. For stronger security, configure Firebase Storage rules:
 
 ```javascript
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     match /{allPaths=**} {
-      // Permitir lectura a todos, escritura solo autenticados
+      // Allow read for all, write only for authenticated users
       allow read;
       allow write: if request.auth != null;
     }
@@ -195,45 +273,67 @@ service firebase.storage {
 }
 ```
 
-## 🐛 Solución de Problemas
+## 🐛 Troubleshooting
 
-### Error: "No se encontró el archivo de credenciales"
-- Verifica que `firebase-credentials.json` esté en la carpeta `config/`
-- Confirma que la ruta en `.env` sea correcta
+### Error: "Credentials file not found"
+- Ensure `firebase-credentials.json` exists in the `config/` folder
+- Confirm the path in `.env` is correct
 
-### Error: "FIREBASE_STORAGE_BUCKET no está configurada"
-- Edita `.env` y actualiza `FIREBASE_STORAGE_BUCKET` con tu bucket real
+### Error: "FIREBASE_STORAGE_BUCKET is not set"
+- Edit `.env` and update `FIREBASE_STORAGE_BUCKET` with your real bucket
 
-### Error: "Firebase no se pudo inicializar"
-- Verifica que tu bucket de Storage esté habilitado en Firebase Console
-- Confirma que las credenciales tengan permisos de Storage
+### Error: "Firebase failed to initialize"
+- Verify your Storage bucket is enabled in Firebase Console
+- Confirm the credentials have Storage permissions
 
-### El servidor arranca pero Storage no funciona
-- Revisa la consola al iniciar el servidor
-- Verifica los mensajes de estado de Firebase
-- Usa el endpoint `/health` para verificar el estado
+### Server starts but Storage doesn’t work
+- Check console logs when starting the server
+- Verify Firebase status messages
+- Use the `/health` endpoint to verify status
 
-## 🔄 Próximos Pasos
+## ✨ Key Features
 
-1. ✅ Configurar Firebase (completado)
-2. 📝 Implementar autenticación de usuarios
-3. 🖼️ Añadir procesamiento de imágenes
-4. 📊 Implementar límites de tamaño de archivo
-5. 🗂️ Gestión de carpetas y organización
-6. 📈 Agregar métricas y logging
+- ✅ Firebase Cloud Storage — Upload, download, list, delete files
+- ✅ Firebase Auth — User authentication
+- ✅ Firestore — Database for API key management
+- ✅ WebSocket Streaming — Real-time streaming with authentication
+- ✅ Robust Authentication — Double validation (Auth + Firestore)
+- ✅ Interactive Documentation — Automatic Swagger UI
+- ✅ CORS Enabled — Ready for mobile and web apps
 
-## 📖 Recursos Adicionales
+## 🔄 Next Steps
 
-- [Documentación de FastAPI](https://fastapi.tiangolo.com/)
-- [Firebase Admin SDK para Python](https://firebase.google.com/docs/admin/setup)
+1. ✅ Configure Firebase (done)
+2. ✅ Implement user authentication (done)
+3. ✅ WebSocket streaming (done) ⭐
+4. 🖼️ Add image processing
+5. 📊 Implement file size limits
+6. 🗂️ Folder management and organization
+7. 📈 Add metrics and logging
+
+## 📖 Docs and Resources
+
+### Project Docs
+
+- 📡 WebSocket Streaming: `docs/WEBSOCKET_STREAMING.md` — Full guide
+- 🚀 WS Quickstart: `docs/QUICKSTART_WEBSOCKET.md` — Setup in 5 minutes
+- 📱 React Native: `docs/REACT_NATIVE_INTEGRATION.md` — Mobile examples
+- 🔐 Authentication: `docs/AUTENTICACION_FIREBASE.md`
+- 🗄️ Firestore: `docs/GUIA_FIRESTORE.md`
+
+### External Resources
+
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [Firebase Admin SDK for Python](https://firebase.google.com/docs/admin/setup)
 - [Firebase Cloud Storage](https://firebase.google.com/docs/storage)
+- [WebSocket Protocol RFC 6455](https://www.rfc-editor.org/rfc/rfc6455)
 
-## 📝 Notas
+## 📝 Notes
 
-- Los archivos subidos con el endpoint `/upload` se hacen públicos automáticamente
-- Para URLs privadas temporales, usa el endpoint `/url`
-- El tamaño máximo de archivo depende de la configuración de FastAPI (default: sin límite)
+- Files uploaded via `/upload` are made public automatically
+- For private temporary URLs, use the `/url` endpoint
+- The maximum file size depends on FastAPI configuration (default: no hard limit)
 
 ---
 
-**¿Necesitas ayuda?** Revisa la documentación interactiva en `/docs` cuando el servidor esté corriendo.
+Need help? Check the interactive docs at `/docs` when the server is running.
