@@ -5,6 +5,7 @@ from config.firebase_config import FirebaseConfig
 from routes.storage import router as storage_router
 from routes.keys import router as keys_router
 from routes.ws_endpoint import router as ws_router
+from routes.file_manager import router as file_manager_router
 from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
@@ -47,6 +48,7 @@ app.add_middleware(
 app.include_router(storage_router)
 app.include_router(keys_router)
 app.include_router(ws_router)
+app.include_router(file_manager_router)
 
 @app.get("/")
 async def read_root():

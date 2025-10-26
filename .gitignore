@@ -68,3 +68,5 @@ temp/
 # internal docs
 docs/*.md
 *.txt
+
+static/storage/*/
