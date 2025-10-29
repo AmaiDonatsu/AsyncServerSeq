@@ -298,3 +298,40 @@ async def delete_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al eliminar la imagen: {str(e)}"
         )
+    
+# url Signed
+from itsdangerous import URLSafeTimedSerializer
+from datetime import datetime, timedelta
+import os
+from itsdangerous import BadSignature, SignatureExpired
+
+SECRET_KEY = f"{os.getenv('SECRET_KEY')}"
+serializer = URLSafeTimedSerializer(SECRET_KEY)
+
+def generate_signed_url(image_path: str, expires_in_seconds: int = 3600):
+    """
+    Genera una URL firmada temporal
+    expires_in_seconds: por defecto 1 hora
+    """
+    token = serializer.dumps(
+        {"image_path": image_path},
+        salt="image-access"
+    )
+    return f"https://tu-dominio.com/api/images/signed/{token}"
+
+@router.get("/api/images/signed/{token}")
+async def get_signed_image(token: str):
+    try:
+        data = serializer.loads(
+            token,
+            salt="image-access",
+            max_age=3600
+        )
+        image_path = data["image_path"]
+        
+        return FileResponse(image_path)
+        
+    except SignatureExpired:
+        raise HTTPException(status_code=403, detail="URL expirada")
+    except BadSignature:
+        raise HTTPException(status_code=403, detail="URL inválida")
