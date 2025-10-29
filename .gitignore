@@ -70,3 +70,5 @@ docs/*.md
 *.txt
 
 static/storage/*/
+
+deprecated_tests/*.py
