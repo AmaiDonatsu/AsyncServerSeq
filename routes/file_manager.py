@@ -203,9 +203,9 @@ async def get_image(
             detail="No se pudo obtener el ID del usuario"
         )
     
-    file_path = STORAGE_BASE_DIR / user_id / filename
-    
-    if not file_path.exists():
+    file_path = get_file_path_dir(user_id, filename)
+
+    if not verify_file(file_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Imagen no encontrada"
@@ -317,21 +317,203 @@ def generate_signed_url(image_path: str, expires_in_seconds: int = 3600):
         {"image_path": image_path},
         salt="image-access"
     )
-    return f"https://tu-dominio.com/api/images/signed/{token}"
+    return f"/files/access-image?token={token}"
 
-@router.get("/api/images/signed/{token}")
-async def get_signed_image(token: str):
+
+@router.get("/{image_id}/signed-url")
+async def get_signed_url(
+    image_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get a signed URL for accessing an image temporarily
+    
+    Args:
+        image_id: Name of the image file
+        current_user: Authenticated user data from Firebase
+    
+    Returns:
+        dict: Contains the signed URL (relative path)
+        
+    Example:
+        GET /files/photo.jpg/signed-url
+        Headers: Authorization: Bearer <token>
+        
+        Response: {"signedUrl": "/files/access-image?token=..."}
+    """
+    user_id = current_user.get('uid')
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se pudo obtener el ID del usuario"
+        )
+    
+    image_path = get_user_image(user_id, image_id)
+
+    if not image_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Imagen no encontrada"
+        )
+
+    if not image_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Imagen no encontrada"
+        )
+    
+    # Generar URL firmada
+    signed_url = generate_signed_url(image_path, expires_in_seconds=3600)
+    
+    return {"signedUrl": signed_url}
+
+
+@router.get("/access-image")
+async def access_image_with_token(token: str):
+    """
+    Access an image using a signed token
+    
+    This endpoint allows temporary access to an image without authentication,
+    using a time-limited signed token.
+    
+    Args:
+        token: Signed token containing the image path
+    
+    Returns:
+        FileResponse: The image file
+        
+    Raises:
+        HTTPException: If token is invalid, expired, or image doesn't exist
+        
+    Example:
+        GET /files/access-image?token=eyJhbGc...
+    """
     try:
+        # Verificar y decodificar el token (expira en 1 hora por defecto)
         data = serializer.loads(
             token,
             salt="image-access",
-            max_age=3600
+            max_age=3600  # 1 hora
         )
-        image_path = data["image_path"]
         
-        return FileResponse(image_path)
+        image_path = data.get("image_path")
+        
+        if not image_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token inválido: no contiene ruta de imagen"
+            )
+        
+        # Verificar que el archivo existe
+        file_path = Path(image_path)
+        if not file_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Imagen no encontrada"
+            )
+        
+        if not file_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La ruta no es un archivo válido"
+            )
+        
+        # Determinar el tipo de contenido
+        ext = file_path.suffix.lower()
+        media_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg"
+        }
+        media_type = media_types.get(ext, "application/octet-stream")
+        
+        print(f"🔓 Acceso temporal concedido a: {file_path.name}")
+        
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            filename=file_path.name
+        )
         
     except SignatureExpired:
-        raise HTTPException(status_code=403, detail="URL expirada")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="El token ha expirado. Solicita una nueva URL firmada."
+        )
+    
     except BadSignature:
-        raise HTTPException(status_code=403, detail="URL inválida")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido o corrupto"
+        )
+    
+    except Exception as e:
+        print(f"✗ Error al procesar token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al procesar la solicitud"
+        )
+
+# verifications
+# ===================================================
+
+def get_user_image(user_id: str, image_id: str) -> str:
+    """
+    Get the full path of a user's image if it exists and is valid
+    
+    Args:
+        user_id: User ID
+        image_id: Image filename
+    
+    Returns:
+        str: Full path to the image or empty string if not found/invalid
+    """
+    if not validate_image_file(image_id):
+        return ""
+    
+    if ".." in image_id or "/" in image_id or "\\" in image_id:
+        return ""
+    
+    user_dir = STORAGE_BASE_DIR / user_id
+    image_path = user_dir / image_id
+    
+    try:
+        image_path = image_path.resolve()
+        user_dir = user_dir.resolve()
+        if not str(image_path).startswith(str(user_dir)):
+            return ""
+    except Exception:
+        return ""
+    
+    if image_path.exists() and image_path.is_file():
+        return str(image_path)
+    return ""
+
+def get_file_path_dir(user_id: str, filename: str) -> Path:
+    """
+    Get the full file path for a user's file
+    
+    Args:
+        user_id: User ID
+        filename: Name of the file
+
+    Returns:
+        Path: Full file path
+    """
+
+    file_path = STORAGE_BASE_DIR / user_id / filename
+
+    return file_path
+def verify_file(file_path: Path) -> bool:
+    """
+    Verify if a file exists for a given user
+    
+    Args:
+        user_id: User ID
+        filename: Name of the file
+
+    Returns:
+        bool: True if file exists, False otherwise
+    """
+    return file_path.exists()
+
