@@ -206,6 +206,26 @@ class ConnectionManager:
             for viewer_ws in viewer_list:
                 if viewer_ws.client_state == WebSocketState.CONNECTED:
                     await viewer_ws.send_text(message)
+                    
+    async def send_command_to_streamer(self, user_id: str, device: str, command: str):
+        """
+        Envía un comando de texto al streamer específico (el celular)
+        """
+        connection_id = f"{user_id}:{device}"
+        
+        if connection_id not in self.streamers:
+            print(f"⚠️ No hay streamer activo para: {connection_id}")
+            return False
+        
+        streamer_ws = self.streamers[connection_id]
+        
+        if streamer_ws.client_state == WebSocketState.CONNECTED:
+            print(f"📤 Enviando comando al streamer: {connection_id}")
+            await streamer_ws.send_text(command)
+            return True
+        else:
+            print(f"⚠️ Streamer no conectado: {connection_id}")
+            return False
 
 
 manager = ConnectionManager()
@@ -305,54 +325,71 @@ async def websocket_endpoint(
     
     try:
         while True:
-            # bytes or text data
-            try:
-                # Intentar recibir como bytes (para imágenes)
-                data = await websocket.receive_bytes()
+            # 🆕 USAR receive() genérico que maneja ambos
+            message = await websocket.receive()
+            
+            # 🎯 Detectar el tipo de mensaje
+            if "bytes" in message:
+                # ==========================================
+                # Es un FRAME (binario)
+                # ==========================================
+                data = message["bytes"]
                 frame_count += 1
                 
-                # 🔍 LOGS DETALLADOS
                 connection_id = f"{user_id}:{device}"
                 viewer_count = len(manager.viewers.get(connection_id, []))
                 
-                print(f"📸 Frame {frame_count} recibido | Tamaño: {len(data)} bytes | User: {user_id} | Device: {device}")
-                print(f"👁️ Viewers esperando: {viewer_count}")
-                print(f"🔄 Broadcasting a viewers...")
+                # Log cada 30 frames para no saturar
+                if frame_count % 30 == 0:
+                    print(f"📸 Frame {frame_count} | {len(data)} bytes | Viewers: {viewer_count}")
                 
+                # Broadcast a viewers
                 await manager.broadcast_frame_to_viewers(user_id, device, data)
                 
-                print(f"✅ Broadcast completado para frame {frame_count}")
+                # ACK opcional (puedes quitarlo para mejorar performance)
+                # ack_msg = {
+                #     "type": "frame_ack",
+                #     "frame_number": frame_count,
+                #     "status": "ok"
+                # }
+                # await manager.send_personal_message(json.dumps(ack_msg), websocket)
+            
+            elif "text" in message:
+                # ==========================================
+                # Es un MENSAJE DE TEXTO (respuesta de comando)
+                # ==========================================
+                text_data = message["text"]
+                print(f"📨 Respuesta del celular: {text_data[:200]}...")
                 
-                ack_msg = {
-                    "type": "frame_ack",
-                    "frame_number": frame_count,
-                    "received_bytes": len(data),
-                    "status": "ok"
-                }
-                await manager.send_personal_message(json.dumps(ack_msg), websocket)
-                
-            except Exception as e:
+                # Parsear la respuesta
                 try:
-                    data = await websocket.receive_text()
-                    print(f"📝 Mensaje de texto recibido: {data[:100]}...")
+                    response_json = json.loads(text_data)
+                    response_type = response_json.get("type")
                     
-                    response = {
-                        "type": "text_ack",
-                        "message": "Mensaje recibido",
-                        "status": "ok"
-                    }
-                    await manager.send_personal_message(json.dumps(response), websocket)
-                    
-                except:
-                    print(f"⚠️ Error al recibir datos: {e}")
-                    break
-    
+                    if response_type == "response":
+                        # Es una respuesta de comando ejecutado
+                        command_id = response_json.get("id")
+                        status_cmd = response_json.get("status")
+                        print(f"✅ Comando {command_id} ejecutado: {status_cmd}")
+                        
+                        # Opcional: reenviar la respuesta a los viewers
+                        connection_id = f"{user_id}:{device}"
+                        if connection_id in manager.viewers:
+                            for viewer_ws in manager.viewers[connection_id]:
+                                if viewer_ws.client_state == WebSocketState.CONNECTED:
+                                    await viewer_ws.send_text(text_data)
+                
+                except json.JSONDecodeError:
+                    print(f"⚠️ Mensaje no es JSON válido: {text_data[:100]}")
+
     except WebSocketDisconnect:
         print(f"🔌 Streamer desconectado: {user_id}:{device}")
         manager.disconnect_streamer(user_id, device)
-    
+
     except Exception as e:
         print(f"❌ Error en la conexión WebSocket: {e}")
+        import traceback
+        traceback.print_exc()
         manager.disconnect_streamer(user_id, device)
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
@@ -463,20 +500,41 @@ async def websocket_view_endpoint(
     try:
         while True:
             try:
-                # Optional commands from viewer
+                # Recibir comandos del viewer (desktop/postman)
                 data = await websocket.receive_text()
                 print(f"📝 Comando del viewer: {data[:100]}...")
                 
-                # Ex:
-                # {"command": "request_keyframe"}
-                # {"command": "change_quality", "quality": 0.8}
+                # 🆕 NUEVO: Parsear el comando
+                try:
+                    command_data = json.loads(data)
+                    command_type = command_data.get("type")
+                    
+                    # 🎯 Si es un comando de control, reenviarlo al streamer
+                    if command_type == "command":
+                        print(f"🎮 Reenviando comando al dispositivo: {user_id}:{device}")
+                        
+                        # Reenviar al streamer (celular)
+                        await manager.send_command_to_streamer(user_id, device, data)
+                        
+                        # ACK al viewer
+                        response = {
+                            "type": "command_ack",
+                            "message": "Comando enviado al dispositivo",
+                            "status": "ok"
+                        }
+                        await manager.send_personal_message(json.dumps(response), websocket)
+                    
+                    else:
+                        # Otros comandos (request_keyframe, etc.)
+                        response = {
+                            "type": "command_ack",
+                            "message": "Comando recibido",
+                            "status": "ok"
+                        }
+                        await manager.send_personal_message(json.dumps(response), websocket)
                 
-                response = {
-                    "type": "command_ack",
-                    "message": "Comando recibido",
-                    "status": "ok"
-                }
-                await manager.send_personal_message(json.dumps(response), websocket)
+                except json.JSONDecodeError:
+                    print(f"⚠️ Error parseando JSON: {data}")
                 
             except WebSocketDisconnect:
                 break
@@ -493,7 +551,6 @@ async def websocket_view_endpoint(
         manager.disconnect_viewer(user_id, device, websocket)
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
-
 
 @router.get("/status")
 async def websocket_status():
