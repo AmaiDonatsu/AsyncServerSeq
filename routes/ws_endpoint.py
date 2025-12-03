@@ -328,9 +328,11 @@ async def websocket_endpoint(
     
     try:
         while True:
-            # 🆕 USAR receive() genérico que maneja ambos
             message = await websocket.receive()
             
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+
             # 🎯 Detectar el tipo de mensaje
             if "bytes" in message:
                 # ==========================================
