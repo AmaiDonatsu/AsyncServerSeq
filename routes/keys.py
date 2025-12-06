@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from config.firebase_config import FirebaseConfig
 from config.auth_dependencies import get_current_user
 from typing import Optional
@@ -156,21 +156,20 @@ async def list_available_keys(current_user: dict = Depends(get_current_user)):
             detail=f"Error al obtener las claves disponibles: {str(e)}"
         )
 
-class UpdateKeyRequest(BaseModel):
-    """
-    Body to update key availability
-    """
-    is_available: bool = Field(..., description="Whether the key is available (not reserved)")
-    device: str = Field(..., description="Device name using this key", min_length=1)
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "is_available": False,
-                "device": "Smartphone"
-            }
-        }
 
+class UpdateKeyRequest(BaseModel):
+    is_available: bool = Field(...)
+    device: str | None = Field(None, description="Device name") 
+
+    @model_validator(mode='after')
+    def check_logical_consistency(self):
+        if not self.is_available and not self.device:
+            raise ValueError('Si la clave no está disponible, debes especificar un dispositivo.')
+        
+        if self.is_available and self.device:
+            self.device = None 
+            
+        return self
 
 @router.put("/update_availability/{key_id}")
 async def update_key_availability(
