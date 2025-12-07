@@ -12,6 +12,9 @@ from firebase_admin import auth
 import json
 import asyncio
 
+from config.rate_limiter import ws_rate_limiter
+from utils.frame_validator import frame_validator, MAX_FRAME_SIZE
+
 DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
 
 router = APIRouter(prefix="/ws", tags=["WebSocket"])
@@ -273,6 +276,15 @@ async def websocket_endpoint(
     print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
     print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
 
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    print(f"🌍 Client IP: {client_ip}")
+
+    can_connect, reason = ws_rate_limiter.can_connect(client_ip)
+    if not can_connect:
+        print(f"❌ Connection rate limit exceeded for IP {client_ip}: {reason}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
+        return
+    
     # Verify Firebase Auth token
     # ==========================================
     user_data = await verify_auth_token(token)
@@ -311,6 +323,10 @@ async def websocket_endpoint(
     # Establish WebSocket connection as streamer
     # ==========================================
     await manager.connect_streamer(websocket, user_id, device)
+    ws_rate_limiter.register_connection(client_ip)
+
+    connection_id = f"{user_id}:{device}"
+    print(f"🔗 Connection established for streamer: {connection_id}")
 
     # Send welcome message
     welcome_msg = {
@@ -325,7 +341,7 @@ async def websocket_endpoint(
     # Maintain connection and receive frames
     # ==========================================
     frame_count = 0
-    
+    rejected_frames = 0
     try:
         while True:
             message = await websocket.receive()
@@ -333,32 +349,53 @@ async def websocket_endpoint(
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1000))
 
-            # 🎯 Detectar el tipo de mensaje
             if "bytes" in message:
-                # ==========================================
-                # Es un FRAME (binario)
-                # ==========================================
                 data = message["bytes"]
-                frame_count += 1
+
+                is_valid, status_msg, validation_msg = frame_validator.validate_frame_size(data)
                 
-                connection_id = f"{user_id}:{device}"
-                viewer_count = len(manager.viewers.get(connection_id, []))
+                if not is_valid:
+                    rejected_frames += 1
+                    print(f"❌ Frame rechazado ({status_msg}): {validation_msg}")
+
+                    error_mmsg = {
+                        "type": "frame_rejected",
+                        "reason": status_msg,
+                        "message": validation_msg,
+                        "frame_number": frame_count
+                    }
+                    await manager.send_personal_message(json.dumps(error_mmsg), websocket)
+
+                    if rejected_frames > 10:
+                        print(f"❌ Demasiados frames rechazados, cerrando conexión")
+                        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Demasiados frames inválidos")
+                        break
+                    continue
+
+                rate_ok, rate_msg = frame_validator.validate_frame_rate(connection_id)
+                if not rate_ok:
+                    if frame_count % 100 == 0:
+                        print(f"⚠️ {rate_msg}")
+                    continue
+                #connection_id = f"{user_id}:{device}"
+
+                frame_validator.record_frame(connection_id, len(data))
+
+                frame_count += 1
+                #viewer_count = len(manager.viewers.get(connection_id, []))
                 
                 # Log cada 30 frames para no saturar
                 if frame_count % 30 == 0:
-                    print(f"📸 Frame {frame_count} | {len(data)} bytes | Viewers: {viewer_count}")
-                
+                    stats = frame_validator.get_stats(connection_id)
+                    print(f"📸 Frame {frame_count} | "
+                          f"{len(data)/1024:.1f} KB | "
+                          f"FPS: {stats.get('avg_fps', 0)} | "
+                          f"Bandwidth: {stats.get('bandwidth_mbps', 0)} Mbps")
+                    
                 # Broadcast a viewers
                 await manager.broadcast_frame_to_viewers(user_id, device, data)
                 
-                # ACK opcional (puedes quitarlo para mejorar performance)
-                # ack_msg = {
-                #     "type": "frame_ack",
-                #     "frame_number": frame_count,
-                #     "status": "ok"
-                # }
-                # await manager.send_personal_message(json.dumps(ack_msg), websocket)
-            
+               
             elif "text" in message:
                 # ==========================================
                 # Es un MENSAJE DE TEXTO (respuesta de comando)
@@ -415,16 +452,19 @@ async def websocket_endpoint(
 
 
     except WebSocketDisconnect:
-        print(f"🔌 Streamer desconectado: {user_id}:{device}")
-        manager.disconnect_streamer(user_id, device)
+        print(f"🔌 Streamer desconectado: {connection_id}")
+        
+        final_stats = frame_validator.get_stats(connection_id)
+        print(f"📊 Final stats for {connection_id}:")
+        print(f"   Total frames: {final_stats.get('total_frames', 0)}")
+        print(f"   Avg FPS: {final_stats.get('avg_fps', 0)}")
+        print(f"   Total data: {final_stats.get('total_bytes', 0) / (1024*1024):.2f} MB")
+        print(f"   Rejected frames: {rejected_frames}")
 
-    except Exception as e:
-        print(f"❌ Error en la conexión WebSocket: {e}")
-        import traceback
-        traceback.print_exc()
+    finally:
         manager.disconnect_streamer(user_id, device)
-        if websocket.client_state == WebSocketState.CONNECTED:
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
+        ws_rate_limiter.unregister_connection(client_ip)
+        frame_validator.cleanup_connection(connection_id)
 
 
 # ==========================================
@@ -467,6 +507,14 @@ async def websocket_view_endpoint(
     print(f"📱 Device to visualize: {device}")
     print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
     print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
+
+    # Rate Limiting for Viewers
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    can_connect, reason = await ws_rate_limiter.can_connect(client_ip)
+    if not can_connect:
+        print(f"❌ Connection rate limit exceeded for viewer IP {client_ip}: {reason}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
+        return
 
     # Token Authentication
     ###############
@@ -518,6 +566,7 @@ async def websocket_view_endpoint(
     # Connect as viewer
     # ==========================================
     await manager.connect_viewer(websocket, user_id, device)
+    ws_rate_limiter.register_connection(client_ip)
     
     welcome_msg = {
         "type": "viewer_connected",
@@ -576,10 +625,12 @@ async def websocket_view_endpoint(
     except WebSocketDisconnect:
         print(f"👁️ Viewer desconectado de: {user_id}:{device}")
         manager.disconnect_viewer(user_id, device, websocket)
+        ws_rate_limiter.unregister_connection(client_ip)
     
     except Exception as e:
         print(f"❌ Error en la conexión del viewer: {e}")
         manager.disconnect_viewer(user_id, device, websocket)
+        ws_rate_limiter.unregister_connection(client_ip)
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
 
