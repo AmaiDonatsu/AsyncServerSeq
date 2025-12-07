@@ -1,6 +1,7 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status, Request
 from fastapi.responses import FileResponse
 from config.auth_dependencies import get_current_user
+from config.rate_limiter import limiter, RATE_LIMITS
 import os
 from pathlib import Path
 from typing import List
@@ -34,7 +35,9 @@ def validate_image_file(filename: str) -> bool:
 
 
 @router.post("/upload-image", status_code=status.HTTP_201_CREATED)
+@limiter.limit(RATE_LIMITS["upload"])
 async def upload_image(
+    request: Request,
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
@@ -123,7 +126,9 @@ async def upload_image(
 
 
 @router.get("/list-images")
+@limiter.limit(RATE_LIMITS["standard"])
 async def list_user_images(
+    request: Request,
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -170,7 +175,9 @@ async def list_user_images(
 
 
 @router.get("/get-image/{filename}")
+@limiter.limit(RATE_LIMITS["download"])
 async def get_image(
+    request: Request,
     filename: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -241,7 +248,9 @@ async def get_image(
 
 
 @router.delete("/delete-image/{filename}")
+@limiter.limit(RATE_LIMITS["standard"])
 async def delete_image(
+    request: Request,
     filename: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -321,7 +330,9 @@ def generate_signed_url(image_path: str, expires_in_seconds: int = 3600):
 
 
 @router.get("/{image_id}/signed-url")
+@limiter.limit(RATE_LIMITS["standard"])
 async def get_signed_url(
+    request: Request,
     image_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -369,7 +380,8 @@ async def get_signed_url(
 
 
 @router.get("/access-image")
-async def access_image_with_token(token: str):
+@limiter.limit(RATE_LIMITS["download"])
+async def access_image_with_token(request: Request, token: str):
     """
     Access an image using a signed token
     
