@@ -72,3 +72,4 @@ docs/*.md
 static/storage/*/
 
 deprecated_tests/*.py
+.VSCodeCounter
