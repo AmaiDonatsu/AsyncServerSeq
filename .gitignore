@@ -1,5 +1,9 @@
 # Python
 __pycache__/
+config/__pycache__/
+routes/__pycache__/
+utils/__pycache__/
+tests/__pycache__/
 *.py[cod]
 *$py.class
 *.so
