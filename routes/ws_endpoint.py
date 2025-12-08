@@ -15,6 +15,7 @@ import asyncio
 
 from config.rate_limiter import ws_rate_limiter
 from utils.frame_validator import frame_validator, MAX_FRAME_SIZE
+from utils.heartbeat import heartbeat_manager
 
 logger = get_logger(__name__)
 
@@ -107,6 +108,12 @@ class ConnectionManager:
         await websocket.accept()
         connection_id = f"{user_id}:{device}"
         self.streamers[connection_id] = websocket
+
+        await heartbeat_manager.start_heartbeat(
+            connection_id = connection_id,
+            websocket=websocket,
+            on_dead= lambda conn_id: self._handle_dead_streamer(conn_id)
+        )
         
         self.logger.info(LogEvent.WS_CONNECTION_ESTABLISHED,
                         connection_type="streamer",
@@ -125,6 +132,17 @@ class ConnectionManager:
             self.viewers[connection_id] = []
         
         self.viewers[connection_id].append(websocket)
+        
+        # Crear un ID único para este viewer
+        viewer_index = len(self.viewers[connection_id]) - 1
+        viewer_id = f"{connection_id}:viewer:{viewer_index}"
+
+        await heartbeat_manager.start_heartbeat(
+            connection_id=viewer_id,
+            websocket=websocket,
+            on_dead=lambda vid: self._handle_dead_viewer(connection_id, websocket)
+        )
+
         self.logger.info(LogEvent.WS_CONNECTION_ESTABLISHED,
                         connection_type="viewer",
                         connection_id=connection_id,
@@ -139,6 +157,8 @@ class ConnectionManager:
         if connection_id in self.streamers:
             del self.streamers[connection_id]
 
+            heartbeat_manager.stop_heartbeat(connection_id)
+
             self.logger.info(LogEvent.WS_DISCONNECTED,
                            connection_type="streamer",
                            connection_id=connection_id,
@@ -151,14 +171,19 @@ class ConnectionManager:
         connection_id = f"{user_id}:{device}"
         if connection_id in self.viewers:
             if websocket in self.viewers[connection_id]:
+                # Obtener el índice ANTES de remover
+                viewer_index = self.viewers[connection_id].index(websocket)
+                viewer_id = f"{connection_id}:viewer:{viewer_index}"
+                
+                # Ahora sí remover
                 self.viewers[connection_id].remove(websocket)
+                heartbeat_manager.stop_heartbeat(viewer_id)
                 
                 self.logger.info(LogEvent.WS_DISCONNECTED,
                                connection_type="viewer",
                                connection_id=connection_id,
                                remaining_viewers=len(self.viewers[connection_id]))
                 
-                # Si no quedan viewers para este stream, limpiar la lista
                 if len(self.viewers[connection_id]) == 0:
                     del self.viewers[connection_id]
             
@@ -166,9 +191,51 @@ class ConnectionManager:
                            total_streamers=len(self.streamers),
                            total_viewers=sum(len(v) for v in self.viewers.values()))
     
+    async def _handle_dead_streamer(self, connection_id: str):
+        """
+        Handle a dead streamer connection
+        """
+        self.logger.error("connection.streamer_dead",
+                         connection_id=connection_id)
+        
+        if connection_id in self.streamers:
+            # Notify all viewers that stream is dead
+            if connection_id in self.viewers:
+                dead_msg = json.dumps({
+                    "type": "stream_dead",
+                    "message": "Stream connection lost",
+                    "connection_id": connection_id
+                })
+                
+                for viewer_ws in self.viewers[connection_id]:
+                    try:
+                        if viewer_ws.client_state == WebSocketState.CONNECTED:
+                            await viewer_ws.send_text(dead_msg)
+                    except Exception as e:
+                        self.logger.debug("notify_viewer_failed", error=str(e))
+            
+            del self.streamers[connection_id]
+    
+    async def _handle_dead_viewer(self, connection_id: str, websocket: WebSocket):
+        """
+        Handle a dead viewer connection
+        """
+        self.logger.warning("connection.viewer_dead",
+                          connection_id=connection_id)
+        
+        if connection_id in self.viewers:
+            if websocket in self.viewers[connection_id]:
+                self.viewers[connection_id].remove(websocket)
+                
+                if len(self.viewers[connection_id]) == 0:
+                    del self.viewers[connection_id]
+    
     def is_stream_active(self, user_id: str, device: str) -> bool:
         connection_id = f"{user_id}:{device}"
-        return connection_id in self.streamers
+        return (
+            connection_id in self.streamers and
+            heartbeat_manager.is_alive(connection_id)
+        )
     
     async def send_personal_message(self, message: str, websocket: WebSocket):
         """
@@ -211,7 +278,6 @@ class ConnectionManager:
                                    error=str(e))
                 disconnected_viewers.append(viewer_ws)
         
-        # Limpiar viewers desconectados
         for viewer_ws in disconnected_viewers:
             if viewer_ws in self.viewers[connection_id]:
                 self.viewers[connection_id].remove(viewer_ws)
@@ -448,7 +514,13 @@ async def websocket_endpoint(
                     response_json = json.loads(text_data)
                     response_type = response_json.get("type")
                     
-                    if response_type == "response":
+                    # Manejar pong del heartbeat
+                    if response_type == "pong":
+                        heartbeat_manager.record_pong(connection_id)
+                        logger.debug("ws.pong_received",
+                                   connection_id=connection_id)
+                    
+                    elif response_type == "response":
                         command_id = response_json.get("id")
                         status_cmd = response_json.get("status")
                         logger.info("ws.command_response",
@@ -654,7 +726,16 @@ async def websocket_view_endpoint(
                     command_data = json.loads(data)
                     command_type = command_data.get("type")
                     
-                        # 🎯 if is a device command
+                    # Manejar pong del heartbeat para viewer
+                    if command_type == "pong":
+                        viewer_index = manager.viewers.get(f"{user_id}:{device}", []).index(websocket) if websocket in manager.viewers.get(f"{user_id}:{device}", []) else 0
+                        viewer_id = f"{user_id}:{device}:viewer:{viewer_index}"
+                        heartbeat_manager.record_pong(viewer_id)
+                        logger.debug("ws.viewer_pong_received",
+                                   connection_id=f"{user_id}:{device}")
+                        continue
+                    
+                    # 🎯 if is a device command
                     if command_type == "command":
                         logger.info(LogEvent.WS_COMMAND_SENT,
                                    connection_id=f"{user_id}:{device}",
