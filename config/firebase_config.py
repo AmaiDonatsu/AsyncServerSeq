@@ -128,7 +128,8 @@ class FirebaseConfig:
         if not cls._initialized:
             cls.initialize()
         
-        decoded_token = auth.verify_id_token(id_token)
+        # tolerar 10 segundos de skew de reloj
+        decoded_token = auth.verify_id_token(id_token, clock_skew_seconds=10)
         return decoded_token
     
     @classmethod
