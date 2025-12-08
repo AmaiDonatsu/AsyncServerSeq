@@ -66,13 +66,26 @@ class WebSocketRateLimiter:
     ):
         self.max_connections_per_ip = max_connections_per_ip
         self.max_attempts_per_minute = max_attempts_per_minute
+        self.cleanup_interval = cleanup_interval
+        self._cleanup_task_started = False
         
         # Track: IP -> (connection_count, last_attempt_time, attempt_count)
         self.connections: Dict[str, Tuple[int, datetime, int]] = defaultdict(
             lambda: (0, datetime.now(), 0)
         )
+    
+    def _ensure_cleanup_task(self):
+        """Start the cleanup task if not already started and event loop is running"""
+        if self._cleanup_task_started:
+            return
         
-        asyncio.create_task(self._cleanup_task(cleanup_interval))
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._cleanup_task(self.cleanup_interval))
+            self._cleanup_task_started = True
+        except RuntimeError:
+            # No running event loop yet, will try again later
+            pass
     
     async def can_connect(self, client_ip: str) -> Tuple[bool, str]:
         """
@@ -81,6 +94,9 @@ class WebSocketRateLimiter:
         Returns:
             (can_connect: bool, reason: str)
         """
+        # Ensure cleanup task is running
+        self._ensure_cleanup_task()
+        
         now = datetime.now()
         
         if client_ip not in self.connections:

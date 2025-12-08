@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field, model_validator
 from config.firebase_config import FirebaseConfig
 from config.auth_dependencies import get_current_user
@@ -253,6 +253,7 @@ async def update_key_availability(
 @router.post("/create", response_model=CreateKeyResponse)
 @limiter.limit(RATE_LIMITS["auth"])
 async def create_key(
+    request: Request,
     key_data: CreateKeyRequest,
     current_user: dict = Depends(get_current_user)
 ):
