@@ -8,12 +8,15 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from fastapi.websockets import WebSocketState
 from typing import Optional
 from config.firebase_config import FirebaseConfig
+from config.logger_config import get_logger, bind_request_context, clear_request_context, LogEvent, generate_request_id
 from firebase_admin import auth
 import json
 import asyncio
 
 from config.rate_limiter import ws_rate_limiter
 from utils.frame_validator import frame_validator, MAX_FRAME_SIZE
+
+logger = get_logger(__name__)
 
 DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
 
@@ -38,7 +41,7 @@ async def verify_auth_token(token: str) -> Optional[dict]:
         decoded_token = FirebaseConfig.verify_token(token)
         return decoded_token
     except Exception as e:
-        print(f"❌ Error al verificar token: {e}")
+        logger.warning(LogEvent.AUTH_TOKEN_FAILED, error=str(e))
         return None
 
 
@@ -65,14 +68,22 @@ async def verify_secret_key(user_id: str, secret_key: str, device: str) -> bool:
         docs = list(query.stream())
         
         if len(docs) > 0:
-            print(f"✅ Key válida encontrada para user={user_id}, device={device}")
+            logger.info(LogEvent.AUTH_KEY_VALIDATED, 
+                       user_id=user_id, 
+                       device=device)
             return True
         else:
-            print(f"❌ No se encontró key válida para user={user_id}, device={device}")
+            logger.warning(LogEvent.AUTH_KEY_INVALID, 
+                          user_id=user_id, 
+                          device=device)
             return False
             
     except Exception as e:
-        print(f"❌ Error al verificar secret key: {e}")
+        logger.error("auth.key_check_failed", 
+                    user_id=user_id,
+                    device=device,
+                    error=str(e),
+                    exc_info=True)
         return False
 
 
@@ -85,13 +96,10 @@ class ConnectionManager:
     Separates between streamers (who send) and viewers (who receive)
     """
     def __init__(self):
-        # Conexiones que transmiten (streamers)
         self.streamers: dict[str, WebSocket] = {}
-        
-        # Conexiones que visualizan (viewers)
-        # Clave: "user_id:device" -> Lista de WebSockets que están viendo ese stream
         self.viewers: dict[str, list[WebSocket]] = {}
-    
+        self.logger = get_logger(f"{__name__}.ConnectionManager")
+
     async def connect_streamer(self, websocket: WebSocket, user_id: str, device: str):
         """
         Acepta y registra una nueva conexión de streaming (transmisión)
@@ -99,9 +107,13 @@ class ConnectionManager:
         await websocket.accept()
         connection_id = f"{user_id}:{device}"
         self.streamers[connection_id] = websocket
-        print(f"🎥 Nuevo streamer: {connection_id}")
-        print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
-    
+        
+        self.logger.info(LogEvent.WS_CONNECTION_ESTABLISHED,
+                        connection_type="streamer",
+                        connection_id=connection_id,
+                        total_streamers=len(self.streamers),
+                        total_viewers=sum(len(v) for v in self.viewers.values()))
+        
     async def connect_viewer(self, websocket: WebSocket, user_id: str, device: str):
         """
         Acepta y registra una nueva conexión de visualización (viewer)
@@ -113,10 +125,11 @@ class ConnectionManager:
             self.viewers[connection_id] = []
         
         self.viewers[connection_id].append(websocket)
-        print(f"👁️ Nuevo viewer para: {connection_id}")
-        print(f"🔍 Total de viewers para este stream: {len(self.viewers[connection_id])}")
-        print(f"🔍 WebSocket state: {websocket.client_state}")
-        print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+        self.logger.info(LogEvent.WS_CONNECTION_ESTABLISHED,
+                        connection_type="viewer",
+                        connection_id=connection_id,
+                        viewers_for_stream=len(self.viewers[connection_id]),
+                        total_streamers=len(self.streamers))
     
     def disconnect_streamer(self, user_id: str, device: str):
         """
@@ -125,8 +138,11 @@ class ConnectionManager:
         connection_id = f"{user_id}:{device}"
         if connection_id in self.streamers:
             del self.streamers[connection_id]
-            print(f"🎥 Streamer desconectado: {connection_id}")
-            print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+
+            self.logger.info(LogEvent.WS_DISCONNECTED,
+                           connection_type="streamer",
+                           connection_id=connection_id,
+                           remaining_streamers=len(self.streamers))
     
     def disconnect_viewer(self, user_id: str, device: str, websocket: WebSocket):
         """
@@ -136,13 +152,19 @@ class ConnectionManager:
         if connection_id in self.viewers:
             if websocket in self.viewers[connection_id]:
                 self.viewers[connection_id].remove(websocket)
-                print(f"�️ Viewer desconectado de: {connection_id}")
+                
+                self.logger.info(LogEvent.WS_DISCONNECTED,
+                               connection_type="viewer",
+                               connection_id=connection_id,
+                               remaining_viewers=len(self.viewers[connection_id]))
                 
                 # Si no quedan viewers para este stream, limpiar la lista
                 if len(self.viewers[connection_id]) == 0:
                     del self.viewers[connection_id]
             
-            print(f"📊 Streamers activos: {len(self.streamers)} | Viewers activos: {sum(len(v) for v in self.viewers.values())}")
+            self.logger.debug("ws.connection_stats",
+                           total_streamers=len(self.streamers),
+                           total_viewers=sum(len(v) for v in self.viewers.values()))
     
     def is_stream_active(self, user_id: str, device: str) -> bool:
         connection_id = f"{user_id}:{device}"
@@ -168,29 +190,25 @@ class ConnectionManager:
         """
         connection_id = f"{user_id}:{device}"
         
-        print(f"🔍 Buscando viewers para: {connection_id}")
-        print(f"🔍 Viewers registrados: {list(self.viewers.keys())}")
-        
         if connection_id not in self.viewers:
-            print(f"⚠️ No hay viewers para este stream")
             return
 
-        print(f"📤 Enviando frame de {len(frame_data)} bytes a {len(self.viewers[connection_id])} viewers")
+        viewer_count = len(self.viewers[connection_id])
 
         # Send the frame to all viewers
         disconnected_viewers = []
         
         for idx, viewer_ws in enumerate(self.viewers[connection_id]):
             try:
-                print(f"  → Viewer {idx+1}: enviando (estado: {viewer_ws.client_state})")
                 if viewer_ws.client_state == WebSocketState.CONNECTED:
                     await viewer_ws.send_bytes(frame_data)
-                    print(f"  ✅ Enviado exitosamente a viewer {idx+1}")
                 else:
-                    print(f"  ⚠️ Viewer {idx+1} no conectado")
                     disconnected_viewers.append(viewer_ws)
             except Exception as e:
-                print(f"  ❌ Error enviando a viewer {idx+1}: {e}")
+                self.logger.warning("ws.frame_send_error",
+                                   connection_id=connection_id,
+                                   viewer_index=idx,
+                                   error=str(e))
                 disconnected_viewers.append(viewer_ws)
         
         # Limpiar viewers desconectados
@@ -220,17 +238,20 @@ class ConnectionManager:
         connection_id = f"{user_id}:{device}"
         
         if connection_id not in self.streamers:
-            print(f"⚠️ No active streamer for: {connection_id}")
+            self.logger.warning("ws.no_active_streamer",
+                              connection_id=connection_id)
             return False
         
         streamer_ws = self.streamers[connection_id]
         
         if streamer_ws.client_state == WebSocketState.CONNECTED:
-            print(f"📤 Enviando comando al streamer: {connection_id}")
+            self.logger.debug(LogEvent.WS_COMMAND_SENT,
+                            connection_id=connection_id)
             await streamer_ws.send_text(command)
             return True
         else:
-            print(f"⚠️ Streamer not connected: {connection_id}")
+            self.logger.warning("ws.streamer_not_connected",
+                              connection_id=connection_id)
             return False
 
 
@@ -269,19 +290,22 @@ async def websocket_endpoint(
     - Server responds with confirmations or errors
     - Expected frame rate: ~15 FPS (every 66ms approx)
     """
-    
-    print("\n" + "="*60)
-    print("🌐 New WebSocket connection")
-    print(f"📱 Device: {device}")
-    print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
-    print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
 
+    request_id = generate_request_id()
     client_ip = websocket.client.host if websocket.client else "unknown"
-    print(f"🌍 Client IP: {client_ip}")
+    bind_request_context(request_id=request_id, device=device)
 
-    can_connect, reason = ws_rate_limiter.can_connect(client_ip)
+    logger.info(LogEvent.WS_CONNECTION_ATTEMPT,
+               connection_type="streamer",
+               device=device,
+               client_ip=client_ip)
+
+    can_connect, reason = await ws_rate_limiter.can_connect(client_ip)
     if not can_connect:
-        print(f"❌ Connection rate limit exceeded for IP {client_ip}: {reason}")
+        logger.warning(LogEvent.RATE_LIMIT_EXCEEDED,
+                      client_ip=client_ip,
+                      reason=reason,
+                      connection_type="streamer")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
         return
     
@@ -290,35 +314,40 @@ async def websocket_endpoint(
     user_data = await verify_auth_token(token)
     
     if not user_data:
-        print("❌ Authentication failed: Invalid token")
+        logger.warning(LogEvent.AUTH_TOKEN_FAILED,
+                      device=device,
+                      client_ip=client_ip)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
         return
     
     user_id: str = user_data.get('uid')  # type: ignore
     if not user_id:
-        print("❌ No se pudo obtener el user_id del token")
+        logger.warning("auth.user_id_missing",
+                      device=device,
+                      client_ip=client_ip)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User ID no disponible")
         return
     
+    bind_request_context(user_id=user_id)
     user_email = user_data.get('email', 'N/A')
     
-    print(f"✅ Usuario autenticado: {user_id}")
-    print(f"📧 Email: {user_email}")
+    logger.info("auth.user_identified",
+               user_id=user_id,
+               email=user_email)
     
     # Verify secretKey and device in Firestore
     # ==========================================
     is_key_valid = await verify_secret_key(user_id, secretKey, device)
     
     if not is_key_valid:
-        print("❌ Validation failed: Secret key or device not valid")
+        logger.warning(LogEvent.AUTH_KEY_INVALID,
+                      user_id=user_id,
+                      device=device)
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="Secret key or device invalid"
         )
         return
-
-    print(f"✅ Secret key and device validated successfully")
-    print("="*60 + "\n")
     
     # Establish WebSocket connection as streamer
     # ==========================================
@@ -326,7 +355,6 @@ async def websocket_endpoint(
     ws_rate_limiter.register_connection(client_ip)
 
     connection_id = f"{user_id}:{device}"
-    print(f"🔗 Connection established for streamer: {connection_id}")
 
     # Send welcome message
     welcome_msg = {
@@ -356,7 +384,11 @@ async def websocket_endpoint(
                 
                 if not is_valid:
                     rejected_frames += 1
-                    print(f"❌ Frame rechazado ({status_msg}): {validation_msg}")
+                    logger.warning(LogEvent.WS_FRAME_REJECTED,
+                                  connection_id=connection_id,
+                                  reason=status_msg,
+                                  message=validation_msg,
+                                  rejected_count=rejected_frames)
 
                     error_mmsg = {
                         "type": "frame_rejected",
@@ -367,7 +399,9 @@ async def websocket_endpoint(
                     await manager.send_personal_message(json.dumps(error_mmsg), websocket)
 
                     if rejected_frames > 10:
-                        print(f"❌ Demasiados frames rechazados, cerrando conexión")
+                        logger.error("ws.too_many_rejected_frames",
+                                    connection_id=connection_id,
+                                    rejected_count=rejected_frames)
                         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Demasiados frames inválidos")
                         break
                     continue
@@ -375,7 +409,9 @@ async def websocket_endpoint(
                 rate_ok, rate_msg = frame_validator.validate_frame_rate(connection_id)
                 if not rate_ok:
                     if frame_count % 100 == 0:
-                        print(f"⚠️ {rate_msg}")
+                        logger.debug("ws.frame_rate_throttled",
+                                    connection_id=connection_id,
+                                    message=rate_msg)
                     continue
                 #connection_id = f"{user_id}:{device}"
 
@@ -387,10 +423,12 @@ async def websocket_endpoint(
                 # Log cada 30 frames para no saturar
                 if frame_count % 30 == 0:
                     stats = frame_validator.get_stats(connection_id)
-                    print(f"📸 Frame {frame_count} | "
-                          f"{len(data)/1024:.1f} KB | "
-                          f"FPS: {stats.get('avg_fps', 0)} | "
-                          f"Bandwidth: {stats.get('bandwidth_mbps', 0)} Mbps")
+                    logger.debug(LogEvent.WS_FRAME_RECEIVED,
+                                connection_id=connection_id,
+                                frame_number=frame_count,
+                                frame_size_kb=round(len(data)/1024, 1),
+                                avg_fps=stats.get('avg_fps', 0),
+                                bandwidth_mbps=stats.get('bandwidth_mbps', 0))
                     
                 # Broadcast a viewers
                 await manager.broadcast_frame_to_viewers(user_id, device, data)
@@ -401,70 +439,75 @@ async def websocket_endpoint(
                 # Es un MENSAJE DE TEXTO (respuesta de comando)
                 # ==========================================
                 text_data = message["text"]
-                print(f"📨 Respuesta del celular: {text_data[:200]}...\n\n")
+                logger.debug(LogEvent.WS_COMMAND_RECEIVED,
+                            connection_id=connection_id,
+                            message_preview=text_data[:200])
                 
                 # Parsear la respuesta
                 try:
-                    print("iniciando try de json.loads")
                     response_json = json.loads(text_data)
                     response_type = response_json.get("type")
-                    print(f"Tipo de respuesta: {response_type}")
+                    
                     if response_type == "response":
-                        print("es response\n")
-                        # Es una respuesta de comando ejecutado
                         command_id = response_json.get("id")
                         status_cmd = response_json.get("status")
-                        print(f"✅ Comando {command_id} ejecutado: {status_cmd}")
+                        logger.info("ws.command_response",
+                                   connection_id=connection_id,
+                                   command_id=command_id,
+                                   status=status_cmd)
                         
-                        # Opcional: reenviar la respuesta a los viewers
-                        connection_id = f"{user_id}:{device}"
-                        print(f"🔍 Buscando viewers para reenviar respuesta de comando a: {connection_id}")
-                        if DEBUG:
-                            print(f"\nViewers: {manager.viewers}")
-                            print(f" connection_id in viewers: {connection_id in manager.viewers}\n")
-
                         if connection_id in manager.viewers:
-                            print(f"📤 Reenviando respuesta de comando a {len(manager.viewers[connection_id])} viewers")
+                            viewer_count = len(manager.viewers[connection_id])
+                            logger.debug("ws.forwarding_response",
+                                        connection_id=connection_id,
+                                        viewer_count=viewer_count)
                             for viewer_ws in manager.viewers[connection_id]:
                                 if viewer_ws.client_state == WebSocketState.CONNECTED:
                                     await viewer_ws.send_text(text_data)
                     elif response_type == "ui_data":
-                        connection_id = f"{user_id}:{device}"
-                        if DEBUG:
-                            print("es ui_data\n")
-                        
                         if connection_id in manager.viewers:
-                            print(f"📤 Reenviando UI data a {len(manager.viewers[connection_id])} viewers")
+                            viewer_count = len(manager.viewers[connection_id])
+                            logger.debug("ws.forwarding_ui_data",
+                                        connection_id=connection_id,
+                                        viewer_count=viewer_count)
                             for viewer_ws in manager.viewers[connection_id]:
                                 if viewer_ws.client_state == WebSocketState.CONNECTED:
                                     await viewer_ws.send_text(text_data)
                 
                 except json.JSONDecodeError:
-                    print(f"⚠️ Mensaje no es JSON válido: {text_data[:100]}")
+                    logger.warning("ws.invalid_json",
+                                  connection_id=connection_id,
+                                  message_preview=text_data[:100])
             elif "type" in message and message["type"] == "ui_data":
-                print(f"🖥️ UI data received: {message['data'][:100]}...")
+                logger.debug("ws.ui_data_received",
+                            connection_id=connection_id)
                 response_json = json.loads(message["hierarchy"])
 
                 try:
                     await manager.send_personal_message(json.dumps(message), websocket=websocket)
                 except Exception as e:
-                    print(f"❌ Error parseando UI data: {e}")
+                    logger.error("ws.ui_data_error",
+                                connection_id=connection_id,
+                                error=str(e),
+                                exc_info=True)
 
 
     except WebSocketDisconnect:
-        print(f"🔌 Streamer desconectado: {connection_id}")
-        
         final_stats = frame_validator.get_stats(connection_id)
-        print(f"📊 Final stats for {connection_id}:")
-        print(f"   Total frames: {final_stats.get('total_frames', 0)}")
-        print(f"   Avg FPS: {final_stats.get('avg_fps', 0)}")
-        print(f"   Total data: {final_stats.get('total_bytes', 0) / (1024*1024):.2f} MB")
-        print(f"   Rejected frames: {rejected_frames}")
+        logger.info(LogEvent.WS_DISCONNECTED,
+                   connection_type="streamer",
+                   connection_id=connection_id,
+                   total_frames=final_stats.get('total_frames', 0),
+                   avg_fps=final_stats.get('avg_fps', 0),
+                   total_data_mb=round(final_stats.get('total_bytes', 0) / (1024*1024), 2),
+                   rejected_frames=rejected_frames,
+                   duration_seconds=round(final_stats.get('duration_seconds', 0), 2))
 
     finally:
         manager.disconnect_streamer(user_id, device)
         ws_rate_limiter.unregister_connection(client_ip)
         frame_validator.cleanup_connection(connection_id)
+        clear_request_context()
 
 
 # ==========================================
@@ -502,17 +545,22 @@ async def websocket_view_endpoint(
     
     """
     
-    print("\n" + "="*60)
-    print("👁️ New visualization request")
-    print(f"📱 Device to visualize: {device}")
-    print(f"🔑 SecretKey (first 20 chars): {secretKey[:20] if len(secretKey) > 20 else secretKey}")
-    print(f"🎫 Token (first 50 chars): {token[:50] if len(token) > 50 else token}...")
+    request_id = generate_request_id()
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    bind_request_context(request_id=request_id, device=device)
+
+    logger.info(LogEvent.WS_CONNECTION_ATTEMPT,
+               connection_type="viewer",
+               device=device,
+               client_ip=client_ip)
 
     # Rate Limiting for Viewers
-    client_ip = websocket.client.host if websocket.client else "unknown"
     can_connect, reason = await ws_rate_limiter.can_connect(client_ip)
     if not can_connect:
-        print(f"❌ Connection rate limit exceeded for viewer IP {client_ip}: {reason}")
+        logger.warning(LogEvent.RATE_LIMIT_EXCEEDED,
+                      client_ip=client_ip,
+                      reason=reason,
+                      connection_type="viewer")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
         return
 
@@ -522,20 +570,28 @@ async def websocket_view_endpoint(
     user_data = await verify_auth_token(token)
     
     if not user_data:
-        print("❌ Autenticación fallida: Token inválido")
+        logger.warning(LogEvent.AUTH_TOKEN_FAILED,
+                      device=device,
+                      client_ip=client_ip,
+                      connection_type="viewer")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token inválido")
         return
     
     user_id: str = user_data.get('uid')  # type: ignore
     if not user_id:
-        print("❌ No se pudo obtener el user_id del token")
+        logger.warning("auth.user_id_missing",
+                      device=device,
+                      client_ip=client_ip,
+                      connection_type="viewer")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User ID no disponible")
         return
     
+    bind_request_context(user_id=user_id)
     user_email = user_data.get('email', 'N/A')
-    
-    print(f"✅ Usuario autenticado: {user_id}")
-    print(f"📧 Email: {user_email}")
+    logger.info("auth.user_identified",
+               user_id=user_id,
+               email=user_email,
+               connection_type="viewer")
     
     
     # Veryfy secretKey and device
@@ -543,7 +599,10 @@ async def websocket_view_endpoint(
     is_key_valid = await verify_secret_key(user_id, secretKey, device)
     
     if not is_key_valid:
-        print("❌ Validación fallida: Secret key o device no válidos")
+        logger.warning(LogEvent.AUTH_KEY_INVALID,
+                      user_id=user_id,
+                      device=device,
+                      connection_type="viewer")
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION, 
             reason="Secret key o device inválidos"
@@ -553,15 +612,18 @@ async def websocket_view_endpoint(
     # Active stream verification
     # ==========================================
     if not manager.is_stream_active(user_id, device):
-        print(f"❌ No hay stream activo para: {user_id}:{device}")
+        logger.warning("ws.no_active_stream",
+                      user_id=user_id,
+                      device=device)
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="No hay stream activo para este dispositivo"
         )
         return
     
-    print(f"✅ Stream activo encontrado para: {user_id}:{device}")
-    print("="*60 + "\n")
+    logger.info("ws.stream_found",
+               user_id=user_id,
+               device=device)
     
     # Connect as viewer
     # ==========================================
@@ -583,7 +645,10 @@ async def websocket_view_endpoint(
             try:
                 # Recive commands from viewer
                 data = await websocket.receive_text()
-                print(f"📝 Comando del viewer: {data[:100]}...")
+                logger.debug(LogEvent.WS_COMMAND_RECEIVED,
+                            connection_id=f"{user_id}:{device}",
+                            connection_type="viewer",
+                            command_preview=data[:100])
                 
                 try:
                     command_data = json.loads(data)
@@ -591,7 +656,9 @@ async def websocket_view_endpoint(
                     
                         # 🎯 if is a device command
                     if command_type == "command":
-                        print(f"🎮 Reenviando comando al dispositivo: {user_id}:{device}")
+                        logger.info(LogEvent.WS_COMMAND_SENT,
+                                   connection_id=f"{user_id}:{device}",
+                                   command_type=command_type)
                         
                         # send command to streamer
                         await manager.send_command_to_streamer(user_id, device, data)
@@ -614,23 +681,36 @@ async def websocket_view_endpoint(
                         await manager.send_personal_message(json.dumps(response), websocket)
                 
                 except json.JSONDecodeError:
-                    print(f"⚠️ Error parseando JSON: {data}")
+                    logger.warning("ws.invalid_json",
+                                  connection_id=f"{user_id}:{device}",
+                                  connection_type="viewer",
+                                  data_preview=data[:100])
                 
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                print(f"⚠️ Error en viewer: {e}")
+                logger.error("ws.viewer_error",
+                            connection_id=f"{user_id}:{device}",
+                            error=str(e),
+                            exc_info=True)
                 break
     
     except WebSocketDisconnect:
-        print(f"👁️ Viewer desconectado de: {user_id}:{device}")
+        logger.info(LogEvent.WS_DISCONNECTED,
+                   connection_type="viewer",
+                   connection_id=f"{user_id}:{device}")
         manager.disconnect_viewer(user_id, device, websocket)
         ws_rate_limiter.unregister_connection(client_ip)
+        clear_request_context()
     
     except Exception as e:
-        print(f"❌ Error en la conexión del viewer: {e}")
+        logger.error("ws.viewer_connection_error",
+                    connection_id=f"{user_id}:{device}",
+                    error=str(e),
+                    exc_info=True)
         manager.disconnect_viewer(user_id, device, websocket)
         ws_rate_limiter.unregister_connection(client_ip)
+        clear_request_context()
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
 
