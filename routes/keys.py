@@ -4,6 +4,7 @@ from config.firebase_config import FirebaseConfig
 from config.auth_dependencies import get_current_user
 from typing import Optional
 from config.rate_limiter import limiter, RATE_LIMITS
+import secrets
 
 
 router = APIRouter(prefix="/keys", tags=["API Keys"])
@@ -17,18 +18,12 @@ class CreateKeyRequest(BaseModel):
     """
     Body to create a new API Key
     """
-    device: str = Field(..., description="Device name that will use this key", min_length=1)
     name: str = Field(..., description="Descriptive name for the key", min_length=1)
-    reserved: bool = Field(default=False, description="if the key is reserved or not")
-    secretKey: str = Field(..., description="The secret key/API key", min_length=1)
     
     class Config:
         json_schema_extra = {
             "example": {
-                "device": "Production Server",
-                "name": "OpenAI API Key",
-                "reserved": True,
-                "secretKey": "sk-proj-xxxxxxxxxxxxx"
+                "name": "My API Key"
             }
         }
 
@@ -223,7 +218,7 @@ async def update_key_availability(
 
         key_data = key.to_dict()
 
-        if key_data.get('user') != user_id:
+        if key_data and key_data.get('user') != user_id:
             raise HTTPException(
                 status_code=403,
                 detail="No tienes permiso para actualizar esta clave"
@@ -329,10 +324,7 @@ async def create_key(
     
     Body:
         {
-            "device": "Smartphone",
-            "name": "Key for Mobile App",
-            "reserved": true,
-            "secretKey": "sk-proj-xxxxxxxxxxxxx"
+            "name": "My API Key"
         }
     
     Returns:
@@ -344,9 +336,9 @@ async def create_key(
             "message": "Key creada exitosamente",
             "key_id": "abc123def456",
             "data": {
-                "device": "Production Server",
-                "name": "OpenAI API Key",
-                "reserved": true,
+                "device": "",
+                "name": "My API Key",
+                "reserved": false,
                 "secretKey": "sk-proj-xxxxx...",
                 "user": "user_id_from_token"
             }
@@ -365,14 +357,17 @@ async def create_key(
                 detail="No se pudo obtener el ID del usuario del token"
             )
         
+        # Generar secretKey automáticamente
+        secret_key = f"sk-proj-{secrets.token_urlsafe(32)}"
+        
         db = FirebaseConfig.get_firestore()
 
         new_key_data = {
-            "device": key_data.device,
+            "device": "",  # Vacío por defecto, se asignará cuando se use
             "name": key_data.name,
-            "reserved": key_data.reserved,
-            "secretKey": key_data.secretKey,
-            "user": user_id  # ⭐
+            "reserved": False,  # Por defecto no está reservada
+            "secretKey": secret_key,
+            "user": user_id
         }
 
         doc_ref = db.collection('keys').add(new_key_data)
@@ -384,10 +379,10 @@ async def create_key(
             "message": "Key creada exitosamente",
             "key_id": key_id,
             "data": {
-                "device": key_data.device,
+                "device": "",
                 "name": key_data.name,
-                "reserved": key_data.reserved,
-                "secretKey": key_data.secretKey,
+                "reserved": False,
+                "secretKey": secret_key,
                 "user": user_id
             }
         }
