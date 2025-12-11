@@ -7,6 +7,7 @@ from routes.keys import router as keys_router
 from routes.ws_endpoint import router as ws_router
 from routes.file_manager import router as file_manager_router
 from routes.device_controler import router as device_control_router
+from routes.docs import router as docs_router
 from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
@@ -51,6 +52,7 @@ app.include_router(keys_router)
 app.include_router(ws_router)
 app.include_router(file_manager_router)
 app.include_router(device_control_router)
+app.include_router(docs_router)
 
 @app.get("/")
 async def read_root():
