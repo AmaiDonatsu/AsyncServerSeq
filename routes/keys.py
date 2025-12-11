@@ -250,6 +250,68 @@ async def update_key_availability(
             detail=f"Error al actualizar la disponibilidad de la clave: {str(e)}"
         )
 
+class UpdateUserKeyRequest(BaseModel):
+    name: str = Field(..., description="New name for the key", min_length=1)
+    reserved: bool = Field(..., description="New reserved status")
+
+@router.put("/update_user_key/{key_id}")
+async def update_user_key(
+    key_id: str,
+    update_data: UpdateUserKeyRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update the name and reserved status of an API key
+    """
+    try:
+        user_id = current_user.get('uid')
+
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="No se pudo obtener el ID del usuario del token"
+            )
+
+        db = FirebaseConfig.get_firestore()
+        key_ref = db.collection('keys').document(key_id)
+        key = key_ref.get()
+
+        if not key.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Clave no encontrada"
+            )
+
+        key_data = key.to_dict()
+
+        if key_data and key_data.get('user') != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para actualizar esta clave"
+            )
+
+        key_ref.update({
+            "name": update_data.name,
+            "reserved": update_data.reserved
+        })
+
+        return {
+            "success": True,
+            "message": "Clave actualizada exitosamente",
+            "key_id": key_id,
+            "name": update_data.name,
+            "reserved": update_data.reserved
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar la clave: {str(e)}"
+        )
+
 @router.post("/create", response_model=CreateKeyResponse)
 @limiter.limit(RATE_LIMITS["auth"])
 async def create_key(
