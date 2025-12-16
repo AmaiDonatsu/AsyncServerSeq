@@ -6,7 +6,6 @@ from routes.storage import router as storage_router
 from routes.keys import router as keys_router
 from routes.ws_endpoint import router as ws_router
 from routes.file_manager import router as file_manager_router
-from routes.device_controler import router as device_control_router
 from routes.docs import router as docs_router
 from contextlib import asynccontextmanager
 import os
@@ -39,9 +38,14 @@ app = fastapi.FastAPI(
     lifespan=lifespan
 )
 
+allowed_origins = [
+    os.getenv("ALLOW_ORIGIN_WEB", "http://localhost:3000"),
+    os.getenv("ALLOW_ORIGIN_WEB_CONSOLE", "http://localhost:8000"),
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,7 +55,6 @@ app.include_router(storage_router)
 app.include_router(keys_router)
 app.include_router(ws_router)
 app.include_router(file_manager_router)
-app.include_router(device_control_router)
 app.include_router(docs_router)
 
 @app.get("/")

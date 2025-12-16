@@ -4,9 +4,10 @@ Handles authentication and device validation for mobile screen capture streaming
 """
 
 import os
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, status
 from fastapi.websockets import WebSocketState
 from typing import Optional
+from config.auth_dependencies import get_current_user
 from config.firebase_config import FirebaseConfig
 from config.logger_config import get_logger, bind_request_context, clear_request_context, LogEvent, generate_request_id
 from firebase_admin import auth
@@ -796,13 +797,43 @@ async def websocket_view_endpoint(
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Error interno del servidor")
 
 @router.get("/status")
-async def websocket_status():
+async def websocket_status(
+    current_user: dict = Depends(get_current_user)
+):
     """
     Obtiene el estado actual de las conexiones WebSocket
     
     Returns:
         dict: Información sobre conexiones activas (streamers y viewers)
     """
+
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No autorizado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id: str = current_user.get('uid') 
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No autorizado - UID no disponible",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    db = FirebaseConfig.get_firestore()
+    ultrakey = db.collection('ultrakey')
+    # Usamos limit(1) para eficiencia y eliminamos el await ya que firebase-admin es síncrono
+    query = ultrakey.where('user', '==', user_id).limit(1)
+    docs = query.get()
+
+    if not docs:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado - No se encontró clave válida",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     streamers = list(manager.streamers.keys())
     
     viewers_info = {}
