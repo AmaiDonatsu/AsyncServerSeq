@@ -41,11 +41,13 @@ app = fastapi.FastAPI(
 allowed_origins = [
     os.getenv("ALLOW_ORIGIN_WEB", "http://localhost:3000"),
     os.getenv("ALLOW_ORIGIN_WEB_CONSOLE", "http://localhost:8000"),
+    os.getenv("ALLOW_ORIGIN_WEB_PROJECT", "myapp://"),
+    os.getenv("ALLOW_ORIGIN_WEB_PROJECT", "http://localhost:19006"),
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins= "*", #allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,5 +79,5 @@ async def health_check():
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host=host, port=port)
