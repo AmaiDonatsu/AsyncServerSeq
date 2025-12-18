@@ -18,60 +18,27 @@ class FirebaseConfig:
     
     @classmethod
     def initialize(cls):
-        """
-        Init Firebase Admin SDK with credentials
-         --- IGNORE ---
-        """
-        if cls._initialized:
-            print("Firebase ya está inicializado")
-            return
+        if cls._initialized: return
         
         try:
+            cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
-            
-            if not bucket_name:
-                raise ValueError(
-                    "La variable FIREBASE_STORAGE_BUCKET no está configurada en .env\n"
-                    "Ejemplo: FIREBASE_STORAGE_BUCKET=tu-proyecto.appspot.com"
-                )
 
-            # Construir diccionario de credenciales desde variables de entorno
-            cred_dict = {
-                "type": os.getenv("TYPE"),
-                "project_id": os.getenv("PROJECT_ID"),
-                "private_key_id": os.getenv("PRIVATE_KEY_ID"),
-                "private_key": os.getenv("PRIVATE_KEY", "").replace('\\n', '\n'),
-                "client_email": os.getenv("CLIENT_EMAIL"),
-                "client_id": os.getenv("CLIENT_ID"),
-                "auth_uri": os.getenv("AUTH_URI"),
-                "token_uri": os.getenv("TOKEN_URI"),
-                "auth_provider_x509_cert_url": os.getenv("AUTH_PROVIDER_X509_CERT_URL"),
-                "client_x509_cert_url": os.getenv("CLIENT_X509_CERT_URL"),
-                "universe_domain": os.getenv("UNIVERSE_DOMAIN")
-            }
-
-            # Verificar campos críticos
-            if not cred_dict["project_id"] or not cred_dict["private_key"] or not cred_dict["client_email"]:
-                 raise ValueError("Faltan variables de entorno críticas para Firebase (PROJECT_ID, PRIVATE_KEY, CLIENT_EMAIL)")
-            
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred, {
-                'storageBucket': bucket_name
-            })
+            if cred_path and os.path.exists(cred_path):
+                cred = credentials.Certificate(cred_path)
+                firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
+            else:
+                # SI NO HAY ARCHIVO (Nube), usamos la identidad de Cloud Run automáticamente
+                # Esto evita errores de JWT y firmas inválidas
+                firebase_admin.initialize_app(options={'storageBucket': bucket_name})
             
             cls._bucket = storage.bucket()
-            
             cls._firestore_db = firestore.client()
-            
             cls._initialized = True
-            
-            print(f"✓ Firebase inicializado correctamente")
-            print(f"✓ Cloud Storage bucket conectado: {bucket_name}")
-            print(f"✓ Firestore database conectado")
-            
+            print(f"✓ Firebase inicializado (Modo Autodetect)")
         except Exception as e:
-            print(f"✗ Error al inicializar Firebase: {str(e)}")
-            raise
+            print(f"✗ Error: {str(e)}")
+        raise
     
     @classmethod
     def get_bucket(cls):
