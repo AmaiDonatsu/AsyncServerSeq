@@ -18,48 +18,30 @@ class FirebaseConfig:
     
     @classmethod
     def initialize(cls):
-        """
-        Init Firebase Admin SDK with credentials
-         --- IGNORE ---
-        """
-        if cls._initialized:
-            print("Firebase ya está inicializado")
-            return
+        if cls._initialized: return
         
         try:
-            cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH', 'config/firebase-credentials.json')
-            
+            project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
-            
-            if not os.path.exists(cred_path):
-                raise FileNotFoundError(
-                    f"No se encontró el archivo de credenciales en: {cred_path}\n"
-                    "Por favor, descarga tu archivo de credenciales desde Firebase Console."
-                )
-            
-            if not bucket_name:
-                raise ValueError(
-                    "La variable FIREBASE_STORAGE_BUCKET no está configurada en .env\n"
-                    "Ejemplo: FIREBASE_STORAGE_BUCKET=tu-proyecto.appspot.com"
-                )
-            
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred, {
-                'storageBucket': bucket_name
-            })
+            cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+
+            # Si hay un archivo (Local), lo usamos. Si no (Nube), usamos ADC.
+            if cred_path and os.path.exists(cred_path):
+                cred = credentials.Certificate(cred_path)
+                firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
+            else:
+                # IMPORTANTE: Pasamos el projectId explícitamente
+                firebase_admin.initialize_app(options={
+                    'storageBucket': bucket_name,
+                    'projectId': project_id
+                })
             
             cls._bucket = storage.bucket()
-            
             cls._firestore_db = firestore.client()
-            
             cls._initialized = True
-            
-            print(f"✓ Firebase inicializado correctamente")
-            print(f"✓ Cloud Storage bucket conectado: {bucket_name}")
-            print(f"✓ Firestore database conectado")
-            
+            print(f"✓ Firebase inicializado para el proyecto: {project_id}")
         except Exception as e:
-            print(f"✗ Error al inicializar Firebase: {str(e)}")
+            print(f"✗ Error al inicializar: {str(e)}")
             raise
     
     @classmethod
