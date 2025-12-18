@@ -21,24 +21,28 @@ class FirebaseConfig:
         if cls._initialized: return
         
         try:
-            cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+            project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
+            cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
 
+            # Si hay un archivo (Local), lo usamos. Si no (Nube), usamos ADC.
             if cred_path and os.path.exists(cred_path):
                 cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
             else:
-                # SI NO HAY ARCHIVO (Nube), usamos la identidad de Cloud Run automáticamente
-                # Esto evita errores de JWT y firmas inválidas
-                firebase_admin.initialize_app(options={'storageBucket': bucket_name})
+                # IMPORTANTE: Pasamos el projectId explícitamente
+                firebase_admin.initialize_app(options={
+                    'storageBucket': bucket_name,
+                    'projectId': project_id
+                })
             
             cls._bucket = storage.bucket()
             cls._firestore_db = firestore.client()
             cls._initialized = True
-            print(f"✓ Firebase inicializado (Modo Autodetect)")
+            print(f"✓ Firebase inicializado para el proyecto: {project_id}")
         except Exception as e:
-            print(f"✗ Error: {str(e)}")
-        raise
+            print(f"✗ Error al inicializar: {str(e)}")
+            raise
     
     @classmethod
     def get_bucket(cls):
