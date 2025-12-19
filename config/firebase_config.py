@@ -2,6 +2,7 @@ import firebase_admin
 from firebase_admin import credentials, storage, firestore, auth
 from google.cloud.firestore import Client as FirestoreClient
 import os
+import json
 from dotenv import load_dotenv
 
 from typing import Optional
@@ -24,9 +25,15 @@ class FirebaseConfig:
             project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
             cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+            service_account_info = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
 
+            if service_account_info:
+                # Carga las credenciales directamente desde la variable de entorno (Railway)
+                cred_dict = json.loads(service_account_info)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
             # Si hay un archivo (Local), lo usamos. Si no (Nube), usamos ADC.
-            if cred_path and os.path.exists(cred_path):
+            elif cred_path and os.path.exists(cred_path):
                 cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
             else:
