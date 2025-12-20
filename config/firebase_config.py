@@ -76,6 +76,15 @@ class FirebaseConfig:
                 if debug_mode:
                     print(f"  - Project ID: {cred_dict.get('project_id')}")
                     print(f"  - Client Email: {cred_dict.get('client_email')}")
+                    pk = cred_dict.get('private_key', '')
+                    print(f"  🔑 --- DIAGNÓSTICO DE LLAVE ---")
+                    print(f"  - Saltos de línea reales (\\n): {pk.count('\n')}")
+                    print(f"  - ¿Contiene texto '\\\\n' literal?: {'\\n' in pk}")
+                    print(f"  - Longitud total: {len(pk)} caracteres")
+                    visual_pk = pk.replace('\n', ' [↵] ')
+                    print(f"  - Estructura visual: {visual_pk[:50]} ... {visual_pk[-50:]}")
+                    print("precaucion")
+            
                 
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
