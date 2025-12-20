@@ -33,10 +33,10 @@ class FirebaseConfig:
             if debug_mode:
                 print("="*50)
                 print("🔧 FIREBASE CONFIG DEBUG")
-                print(f"  - BUCKET: {bucket_name}")
+                #print(f"  - BUCKET: {bucket_name}")
                 print(f"  - GCP_KEY_BASE64 (len): {len(gcp_key_base64) if gcp_key_base64 else 0}")
-                print(f"  - SERVICE_ACCOUNT_JSON (len): {len(service_account_json) if service_account_json else 0}")
-                print(f"  - CRED_PATH: {cred_path}")
+                #print(f"  - SERVICE_ACCOUNT_JSON (len): {len(service_account_json) if service_account_json else 0}")
+                #print(f"  - CRED_PATH: {cred_path}")
                 print("="*50)
 
             cred_dict = None
@@ -67,7 +67,7 @@ class FirebaseConfig:
                     
                     if debug_mode:
                         print(f"  🔑 Private Key procesada.")
-                        print(f"  - Original contiene \\n literal: {'\\n' in original_key}")
+                        print(f"  - Original contiene \n literal: {'\n' in original_key}")
                         print(f"  - Final contiene salto de línea real: {'\n' in cred_dict['private_key']}")
                         # Mostramos solo inicio y fin por seguridad, pero suficiente para validar formato
                         safe_key_preview = cred_dict['private_key'][:40] + "..." + cred_dict['private_key'][-40:]
