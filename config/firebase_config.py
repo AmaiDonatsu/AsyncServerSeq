@@ -15,42 +15,37 @@ class FirebaseConfig:
     """
     _initialized = False
     _bucket = None
-    _firestore_db: Optional[FirestoreClient] = None
+    _firestore_db = None
     
     @classmethod
     def initialize(cls):
         if cls._initialized: return
         
         try:
-            project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
+            service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
             cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
-            service_account_info = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
 
-            if service_account_info:
-                # Carga las credenciales directamente desde la variable de entorno (Railway)
-                cred_dict = json.loads(service_account_info)
+            if service_account_json:
+                print("⚙️ Cargando credenciales desde FIREBASE_SERVICE_ACCOUNT_JSON")
+                cred_dict = json.loads(service_account_json)
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
-            # Si hay un archivo (Local), lo usamos. Si no (Nube), usamos ADC.
             elif cred_path and os.path.exists(cred_path):
+                print(f"⚙️ Cargando credenciales desde archivo: {cred_path}")
                 cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
             else:
-                # IMPORTANTE: Pasamos el projectId explícitamente
-                firebase_admin.initialize_app(options={
-                    'storageBucket': bucket_name,
-                    'projectId': project_id
-                })
+                raise ValueError("No se encontraron credenciales de Firebase (Archivo o JSON)")
             
             cls._bucket = storage.bucket()
             cls._firestore_db = firestore.client()
             cls._initialized = True
-            print(f"✓ Firebase inicializado para el proyecto: {project_id}")
+            print(f"✓ Firebase inicializado correctamente")
         except Exception as e:
-            print(f"✗ Error al inicializar: {str(e)}")
+            print(f"✗ Error crítico al inicializar Firebase: {str(e)}")
             raise
-    
+
     @classmethod
     def get_bucket(cls):
         """
