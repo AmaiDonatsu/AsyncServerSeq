@@ -77,13 +77,18 @@ class FirebaseConfig:
                     print(f"  - Project ID: {cred_dict.get('project_id')}")
                     print(f"  - Client Email: {cred_dict.get('client_email')}")
                     pk = cred_dict.get('private_key', '')
+                    newline_char = "\n"
+                    backslash_newline = "\\n" 
+                    
                     print(f"  🔑 --- DIAGNÓSTICO DE LLAVE ---")
-                    print(f"  - Saltos de línea reales (\\n): {pk.count('\n')}")
-                    print(f"  - ¿Contiene texto '\\\\n' literal?: {'\\n' in pk}")
+                    print(f"  - Saltos de línea reales (\\n): {pk.count(newline_char)}")
+                    
+                    print(f"  - ¿Contiene texto '{backslash_newline}' literal?: {backslash_newline in pk}")
+                    
                     print(f"  - Longitud total: {len(pk)} caracteres")
-                    visual_pk = pk.replace('\n', ' [↵] ')
-                    print(f"  - Estructura visual: {visual_pk[:50]} ... {visual_pk[-50:]}")
-                    print("precaucion")
+                    
+                    visual_pk = pk.replace(newline_char, ' [↵] ')
+                    print(f"  - Estructura visual: {visual_pk[:60]} ... {visual_pk[-60:]}")
             
                 
                 cred = credentials.Certificate(cred_dict)
