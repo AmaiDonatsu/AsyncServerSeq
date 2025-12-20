@@ -27,10 +27,19 @@ class FirebaseConfig:
             cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
 
             if service_account_json:
-                print("⚙️ Cargando credenciales desde FIREBASE_SERVICE_ACCOUNT_JSON")
-                cred_dict = json.loads(service_account_json)
-                cred = credentials.Certificate(cred_dict)
-                firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
+                try:
+                    print("⚙️ Procesando FIREBASE_SERVICE_ACCOUNT_JSON...")
+                    cred_dict = json.loads(service_account_json)
+                    
+                    if "private_key" in cred_dict:
+                        cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+
+                    cred = credentials.Certificate(cred_dict)
+                    firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
+                    print("✓ Firebase autenticado con éxito tras limpieza de llave")
+                except Exception as e:
+                    print(f"✗ Error al parsear JSON de credenciales: {str(e)}")
+                    raise
             elif cred_path and os.path.exists(cred_path):
                 print(f"⚙️ Cargando credenciales desde archivo: {cred_path}")
                 cred = credentials.Certificate(cred_path)
