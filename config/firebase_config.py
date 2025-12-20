@@ -67,8 +67,8 @@ class FirebaseConfig:
                     
                     if debug_mode:
                         print(f"  🔑 Private Key procesada.")
-                        print(f"  - Original contiene \n literal: {'\n' in original_key}")
-                        print(f"  - Final contiene salto de línea real: {'\n' in cred_dict['private_key']}")
+                        #print(f"  - Original contiene literal: {'\n' in original_key}")
+                        #print(f"  - Final contiene salto de línea real: {'\n' in cred_dict['private_key']}")
                         # Mostramos solo inicio y fin por seguridad, pero suficiente para validar formato
                         safe_key_preview = cred_dict['private_key'][:40] + "..." + cred_dict['private_key'][-40:]
                         print(f"  - Key Preview: {safe_key_preview}")
