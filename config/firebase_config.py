@@ -23,10 +23,21 @@ class FirebaseConfig:
         if cls._initialized: return
         
         try:
+            debug_mode = os.getenv('DEBUG', 'False').lower() == 'true'
+            
             bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
             service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
             gcp_key_base64 = os.getenv('GCP_KEY_BASE64')
             cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+
+            if debug_mode:
+                print("="*50)
+                print("🔧 FIREBASE CONFIG DEBUG")
+                print(f"  - BUCKET: {bucket_name}")
+                print(f"  - GCP_KEY_BASE64 (len): {len(gcp_key_base64) if gcp_key_base64 else 0}")
+                print(f"  - SERVICE_ACCOUNT_JSON (len): {len(service_account_json) if service_account_json else 0}")
+                print(f"  - CRED_PATH: {cred_path}")
+                print("="*50)
 
             cred_dict = None
 
@@ -51,7 +62,20 @@ class FirebaseConfig:
                 # Railway y otras plataformas a veces escapan las barras invertidas.
                 # Esto asegura que los saltos de línea sean reales para la firma criptográfica.
                 if "private_key" in cred_dict:
+                    original_key = cred_dict["private_key"]
                     cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+                    
+                    if debug_mode:
+                        print(f"  🔑 Private Key procesada.")
+                        print(f"  - Original contiene \\n literal: {'\\n' in original_key}")
+                        print(f"  - Final contiene salto de línea real: {'\n' in cred_dict['private_key']}")
+                        # Mostramos solo inicio y fin por seguridad, pero suficiente para validar formato
+                        safe_key_preview = cred_dict['private_key'][:40] + "..." + cred_dict['private_key'][-40:]
+                        print(f"  - Key Preview: {safe_key_preview}")
+
+                if debug_mode:
+                    print(f"  - Project ID: {cred_dict.get('project_id')}")
+                    print(f"  - Client Email: {cred_dict.get('client_email')}")
                 
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
