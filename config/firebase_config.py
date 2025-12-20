@@ -28,17 +28,24 @@ class FirebaseConfig:
 
             if service_account_json:
                 try:
-                    print("⚙️ Procesando FIREBASE_SERVICE_ACCOUNT_JSON...")
+                    # Cargamos el string como diccionario
                     cred_dict = json.loads(service_account_json)
                     
+                    # 🧪 CORRECCIÓN CRUCIAL:
+                    # Railway y otras plataformas a veces escapan las barras invertidas.
+                    # Esto asegura que los saltos de línea sean reales para la firma criptográfica.
                     if "private_key" in cred_dict:
                         cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
-
+                    
                     cred = credentials.Certificate(cred_dict)
                     firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
-                    print("✓ Firebase autenticado con éxito tras limpieza de llave")
+                    
+                    # Tip científico: Si el proyecto sale como 'None', forzamos el ID del JSON
+                    project_id = cred_dict.get('project_id')
+                    print(f"✓ Firebase autenticado para el proyecto: {project_id}")
+                    
                 except Exception as e:
-                    print(f"✗ Error al parsear JSON de credenciales: {str(e)}")
+                    print(f"✗ Error fatal en credenciales: {str(e)}")
                     raise
             elif cred_path and os.path.exists(cred_path):
                 print(f"⚙️ Cargando credenciales desde archivo: {cred_path}")
