@@ -13,3 +13,5 @@ ENV/
 deprecated_tests/
 test/
 docs/
+config/firebase-credentials.json
+config/*.json
