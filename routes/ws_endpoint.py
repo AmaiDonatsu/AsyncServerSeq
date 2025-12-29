@@ -17,6 +17,7 @@ import asyncio
 from config.rate_limiter import ws_rate_limiter
 from utils.frame_validator import frame_validator, MAX_FRAME_SIZE
 from utils.heartbeat import heartbeat_manager
+from services.ai_agent import AIAgent, create_agent_for_session
 
 logger = get_logger(__name__)
 
@@ -100,6 +101,7 @@ class ConnectionManager:
     def __init__(self):
         self.streamers: dict[str, WebSocket] = {}
         self.viewers: dict[str, list[WebSocket]] = {}
+        self.ai_agents: dict[str, AIAgent] = {}  # Agentes AI por conexión
         self.logger = get_logger(f"{__name__}.ConnectionManager")
 
     async def connect_streamer(self, websocket: WebSocket, user_id: str, device: str):
@@ -320,6 +322,126 @@ class ConnectionManager:
             self.logger.warning("ws.streamer_not_connected",
                               connection_id=connection_id)
             return False
+
+    # ==========================================
+    # AI Agent Methods
+    # ==========================================
+    
+    def get_or_create_ai_agent(self, connection_id: str) -> AIAgent:
+        """
+        Obtiene o crea un agente AI para una conexión específica
+        """
+        if connection_id not in self.ai_agents:
+            self.ai_agents[connection_id] = create_agent_for_session()
+            self.logger.info("ai.agent_created", connection_id=connection_id)
+        return self.ai_agents[connection_id]
+    
+    def remove_ai_agent(self, connection_id: str):
+        """
+        Elimina el agente AI de una conexión
+        """
+        if connection_id in self.ai_agents:
+            del self.ai_agents[connection_id]
+            self.logger.debug("ai.agent_removed", connection_id=connection_id)
+    
+    async def process_ai_message(self, user_id: str, device: str, message: str, websocket: WebSocket) -> dict:
+        """
+        Procesa un mensaje con el agente AI y ejecuta comandos si es necesario
+        
+        Args:
+            user_id: ID del usuario
+            device: Nombre del dispositivo
+            message: Mensaje del usuario para el AI
+            websocket: WebSocket del viewer para enviar respuestas
+            
+        Returns:
+            dict con el resultado del procesamiento
+        """
+        connection_id = f"{user_id}:{device}"
+        agent = self.get_or_create_ai_agent(connection_id)
+        
+        self.logger.info("ai.processing_message",
+                        connection_id=connection_id,
+                        message_preview=message[:100])
+        
+        try:
+            result = await agent.process_message(message)
+            
+            if result["type"] == "command":
+                # El AI quiere ejecutar un comando en el dispositivo
+                command_payload = result["content"]
+                function_name = result.get("function_name", "unknown")
+                
+                self.logger.info("ai.command_generated",
+                               connection_id=connection_id,
+                               function_name=function_name,
+                               command=command_payload.get("command"))
+                
+                # Enviar comando al streamer (dispositivo)
+                command_sent = await self.send_command_to_streamer(
+                    user_id, device, json.dumps(command_payload)
+                )
+                
+                if command_sent:
+                    # Notificar al viewer que el comando fue enviado
+                    response = {
+                        "type": "ai_command_sent",
+                        "function_name": function_name,
+                        "command": command_payload,
+                        "status": "sent_to_device"
+                    }
+                else:
+                    response = {
+                        "type": "ai_error",
+                        "message": "No se pudo enviar el comando al dispositivo",
+                        "status": "error"
+                    }
+                
+                await self.send_personal_message(json.dumps(response), websocket)
+                return result
+                
+            elif result["type"] == "text":
+                # El AI respondió con texto
+                response = {
+                    "type": "ai_response",
+                    "message": result["content"],
+                    "status": "ok"
+                }
+                await self.send_personal_message(json.dumps(response), websocket)
+                return result
+                
+            else:
+                # Error del AI
+                response = {
+                    "type": "ai_error",
+                    "message": result.get("content", "Error desconocido"),
+                    "status": "error"
+                }
+                await self.send_personal_message(json.dumps(response), websocket)
+                return result
+                
+        except Exception as e:
+            self.logger.error("ai.processing_error",
+                            connection_id=connection_id,
+                            error=str(e),
+                            exc_info=True)
+            error_response = {
+                "type": "ai_error",
+                "message": f"Error procesando mensaje: {str(e)}",
+                "status": "error"
+            }
+            await self.send_personal_message(json.dumps(error_response), websocket)
+            return {"type": "error", "content": str(e)}
+    
+    def provide_ui_data_to_agent(self, user_id: str, device: str, ui_data: dict):
+        """
+        Proporciona datos de UI al agente AI (respuesta de getUI)
+        """
+        connection_id = f"{user_id}:{device}"
+        if connection_id in self.ai_agents:
+            agent = self.ai_agents[connection_id]
+            agent.provide_function_result("get_screen_tree", ui_data)
+            self.logger.debug("ai.ui_data_provided", connection_id=connection_id)
 
 
 manager = ConnectionManager()
@@ -753,6 +875,29 @@ async def websocket_view_endpoint(
                         }
                         await manager.send_personal_message(json.dumps(response), websocket)
                     
+                    # 🤖 AI Agent message
+                    elif command_type == "ai_message":
+                        ai_text = command_data.get("message", "")
+                        logger.info("ws.ai_message_received",
+                                   connection_id=f"{user_id}:{device}",
+                                   message_preview=ai_text[:100])
+                        
+                        # Procesar con el agente AI
+                        await manager.process_ai_message(user_id, device, ai_text, websocket)
+                    
+                    # 🔄 Reset AI conversation
+                    elif command_type == "ai_reset":
+                        connection_id = f"{user_id}:{device}"
+                        if connection_id in manager.ai_agents:
+                            manager.ai_agents[connection_id].reset_chat()
+                            logger.info("ai.chat_reset", connection_id=connection_id)
+                        response = {
+                            "type": "ai_reset_ack",
+                            "message": "AI conversation reset",
+                            "status": "ok"
+                        }
+                        await manager.send_personal_message(json.dumps(response), websocket)
+                    
                     else:
                         # Other commands (request_keyframe, etc.)
                         response = {
@@ -782,6 +927,7 @@ async def websocket_view_endpoint(
                    connection_type="viewer",
                    connection_id=f"{user_id}:{device}")
         manager.disconnect_viewer(user_id, device, websocket)
+        manager.remove_ai_agent(f"{user_id}:{device}")  # Limpiar agente AI
         ws_rate_limiter.unregister_connection(client_ip)
         clear_request_context()
     
@@ -791,6 +937,7 @@ async def websocket_view_endpoint(
                     error=str(e),
                     exc_info=True)
         manager.disconnect_viewer(user_id, device, websocket)
+        manager.remove_ai_agent(f"{user_id}:{device}")  # Limpiar agente AI
         ws_rate_limiter.unregister_connection(client_ip)
         clear_request_context()
         if websocket.client_state == WebSocketState.CONNECTED:
